@@ -1,0 +1,35 @@
+{
+  "category": "Voice changer",
+  "chain": [
+    {
+      "bypass": false,
+      "params": {
+        "formant": 2.5,
+        "preserve": 1,
+        "semitones": 4
+      },
+      "type": "pitch"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "b1_freq": 150,
+        "b1_gain": -2,
+        "b5_freq": 6000,
+        "b5_gain": 2
+      },
+      "type": "eq"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "ceiling": -1.0
+      },
+      "type": "limiter"
+    }
+  ],
+  "description": "Raises pitch and formants moderately. Results depend strongly on the speaker; perceived gender also depends on intonation, breathiness and speaking style.",
+  "format": "echo.chain-preset",
+  "name": "Feminine-style Voice",
+  "version": 1
+}

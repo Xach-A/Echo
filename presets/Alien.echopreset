@@ -1,0 +1,52 @@
+{
+  "category": "Voice changer",
+  "chain": [
+    {
+      "bypass": false,
+      "params": {
+        "formant": 4,
+        "preserve": 1,
+        "semitones": 4
+      },
+      "type": "pitch"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "freq": 420,
+        "lfo_depth": 20,
+        "lfo_rate": 3,
+        "mix": 35
+      },
+      "type": "ringmod"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "feedback": 60,
+        "mix": 40,
+        "rate": 0.4
+      },
+      "type": "flanger"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "decay": 1.8,
+        "mix": 18
+      },
+      "type": "reverb"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "ceiling": -1.0
+      },
+      "type": "limiter"
+    }
+  ],
+  "description": "Otherworldly voice with shifted formants, ring modulation and flanging.",
+  "format": "echo.chain-preset",
+  "name": "Alien",
+  "version": 1
+}

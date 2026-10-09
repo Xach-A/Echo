@@ -1,0 +1,24 @@
+{
+  "category": "Voice changer",
+  "chain": [
+    {
+      "bypass": false,
+      "params": {
+        "delay": 22,
+        "detune": 12
+      },
+      "type": "doubler"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "ceiling": -1.0
+      },
+      "type": "limiter"
+    }
+  ],
+  "description": "Thick, doubled voice.",
+  "format": "echo.chain-preset",
+  "name": "Doubled Vocals",
+  "version": 1
+}

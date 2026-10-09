@@ -1,0 +1,32 @@
+{
+  "category": "Voice changer",
+  "chain": [
+    {
+      "bypass": false,
+      "params": {
+        "interval1": 4,
+        "interval2": 7
+      },
+      "type": "harmonizer"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "decay": 1.8,
+        "mix": 20
+      },
+      "type": "reverb"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "ceiling": -1.0
+      },
+      "type": "limiter"
+    }
+  ],
+  "description": "Adds a third and a fifth above your voice.",
+  "format": "echo.chain-preset",
+  "name": "Harmony Choir",
+  "version": 1
+}

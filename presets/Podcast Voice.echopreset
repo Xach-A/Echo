@@ -1,0 +1,74 @@
+{
+  "category": "Voice processing",
+  "chain": [
+    {
+      "bypass": false,
+      "params": {
+        "strength": 85
+      },
+      "type": "voice_denoise"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "hp_freq": 70,
+        "hp_on": 1,
+        "hp_slope": 1
+      },
+      "type": "filter"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "range": -20,
+        "ratio": 2,
+        "threshold": -45
+      },
+      "type": "expander"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "b1_freq": 110,
+        "b1_gain": 2,
+        "b2_freq": 320,
+        "b2_gain": -3,
+        "b4_freq": 4500,
+        "b4_gain": 2,
+        "b6_gain": 1
+      },
+      "type": "eq"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "attack": 8,
+        "knee": 8,
+        "makeup": 6,
+        "ratio": 4,
+        "release": 180,
+        "threshold": -24
+      },
+      "type": "compressor"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "freq": 6000,
+        "threshold": -30
+      },
+      "type": "deesser"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "ceiling": -1.5
+      },
+      "type": "limiter"
+    }
+  ],
+  "description": "Warm, even podcast sound: expander, warmth/clarity EQ, firm compression, de-esser.",
+  "format": "echo.chain-preset",
+  "name": "Podcast Voice",
+  "version": 1
+}

@@ -1,0 +1,39 @@
+{
+  "category": "Voice changer",
+  "chain": [
+    {
+      "bypass": false,
+      "params": {
+        "pitch": 100
+      },
+      "type": "robot"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "freq": 60,
+        "mix": 30
+      },
+      "type": "ringmod"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "decay": 0.6,
+        "mix": 10
+      },
+      "type": "reverb"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "ceiling": -1.0
+      },
+      "type": "limiter"
+    }
+  ],
+  "description": "Monotone buzzing robot with a metallic ring.",
+  "format": "echo.chain-preset",
+  "name": "Robot",
+  "version": 1
+}

@@ -1,0 +1,25 @@
+{
+  "category": "Voice changer",
+  "chain": [
+    {
+      "bypass": false,
+      "params": {
+        "intensity": 70,
+        "mode": 0,
+        "noise": -66
+      },
+      "type": "character"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "ceiling": -1.0
+      },
+      "type": "limiter"
+    }
+  ],
+  "description": "Narrow-band phone line voice.",
+  "format": "echo.chain-preset",
+  "name": "Telephone",
+  "version": 1
+}

@@ -1,0 +1,24 @@
+{
+  "category": "Voice changer",
+  "chain": [
+    {
+      "bypass": false,
+      "params": {
+        "intensity": 75,
+        "mode": 3
+      },
+      "type": "character"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "ceiling": -1.0
+      },
+      "type": "limiter"
+    }
+  ],
+  "description": "Distorted bullhorn voice.",
+  "format": "echo.chain-preset",
+  "name": "Megaphone",
+  "version": 1
+}

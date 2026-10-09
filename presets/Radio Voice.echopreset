@@ -1,0 +1,34 @@
+{
+  "category": "Voice changer",
+  "chain": [
+    {
+      "bypass": false,
+      "params": {
+        "makeup": 8,
+        "ratio": 6,
+        "threshold": -26
+      },
+      "type": "compressor"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "intensity": 60,
+        "mode": 1,
+        "noise": -58
+      },
+      "type": "character"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "ceiling": -1.0
+      },
+      "type": "limiter"
+    }
+  ],
+  "description": "Old AM radio broadcast with static.",
+  "format": "echo.chain-preset",
+  "name": "Radio Voice",
+  "version": 1
+}

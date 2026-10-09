@@ -1,0 +1,25 @@
+{
+  "category": "Voice changer",
+  "chain": [
+    {
+      "bypass": false,
+      "params": {
+        "formant": 4.5,
+        "preserve": 1,
+        "semitones": 6
+      },
+      "type": "pitch"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "ceiling": -1.0
+      },
+      "type": "limiter"
+    }
+  ],
+  "description": "Higher pitch with a smaller vocal tract.",
+  "format": "echo.chain-preset",
+  "name": "Child-like Voice",
+  "version": 1
+}

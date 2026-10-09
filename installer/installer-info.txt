@@ -1,0 +1,20 @@
+Echo - free virtual audio mixer and voice changer
+
+What this installer does
+  * Installs the Echo application for your user account (no administrator rights needed).
+  * Adds Start menu shortcuts and an uninstaller.
+
+What it does NOT do
+  * It installs no drivers, services or background updaters.
+  * It does not change your Windows default playback or recording devices.
+  * It does not download anything and Echo makes no network connections.
+
+Virtual microphone / virtual speaker
+  Other apps (Discord, OBS, games) can use Echo's output as a microphone through a
+  virtual audio cable driver. That driver is a separate product (for example the free
+  VB-CABLE from vb-audio.com) that you install yourself; it needs administrator
+  approval. Echo detects it automatically. See docs\VIRTUAL_DEVICES.md.
+
+AI voice conversion (optional)
+  Needs ONNX Runtime and a voice model you are licensed to use. Neither is bundled.
+  See docs\AI_VOICE.md.

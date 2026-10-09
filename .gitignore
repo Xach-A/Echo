@@ -1,0 +1,17 @@
+# Build output
+/build/
+/out/
+CMakeUserPresets.json
+compile_commands.json
+
+# Optional runtime (installed by the user / fetch script)
+/ai/
+*.dll
+!third_party/**/*.dll
+
+# Python / editor
+__pycache__/
+*.pyc
+.vs/
+.vscode/
+*.user
