@@ -192,9 +192,14 @@ WasapiCapture::~WasapiCapture() {
     CloseHandle(readyEvent_);
 }
 
-std::shared_ptr<WasapiCapture> WasapiCapture::open(const StreamOptions& opt, std::string* error) {
+std::shared_ptr<WasapiCapture> WasapiCapture::openAsync(const StreamOptions& opt) {
     std::shared_ptr<WasapiCapture> s(new WasapiCapture(opt));
     s->thread_ = std::thread(&WasapiCapture::threadMain, s.get());
+    return s;
+}
+
+std::shared_ptr<WasapiCapture> WasapiCapture::open(const StreamOptions& opt, std::string* error) {
+    std::shared_ptr<WasapiCapture> s = openAsync(opt);
     if (WaitForSingleObject(s->readyEvent_, 6000) != WAIT_OBJECT_0) {
         if (error) *error = "Timed out opening capture stream";
         return nullptr; // destructor stops the thread
@@ -369,8 +374,10 @@ void WasapiCapture::threadMain() {
                             }
                     }
                 }
-                if (ring_.write(scratch_.data(), samples) < samples)
-                    stats.overruns.fetch_add(1, std::memory_order_relaxed);
+                const size_t written = ring_.write(scratch_.data(), samples);
+                if (written < samples) stats.overruns.fetch_add(1, std::memory_order_relaxed);
+                flowTotal_ += written / static_cast<size_t>(ch);
+                flow_.publish(flowTotal_, static_cast<uint32_t>(written / static_cast<size_t>(ch)), monotonicSeconds());
             }
             if ((flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) && !firstPacket)
                 stats.discontinuities.fetch_add(1, std::memory_order_relaxed);
@@ -418,9 +425,14 @@ WasapiRender::~WasapiRender() {
     CloseHandle(readyEvent_);
 }
 
-std::shared_ptr<WasapiRender> WasapiRender::open(const StreamOptions& opt, std::string* error) {
+std::shared_ptr<WasapiRender> WasapiRender::openAsync(const StreamOptions& opt) {
     std::shared_ptr<WasapiRender> s(new WasapiRender(opt));
     s->thread_ = std::thread(&WasapiRender::threadMain, s.get());
+    return s;
+}
+
+std::shared_ptr<WasapiRender> WasapiRender::open(const StreamOptions& opt, std::string* error) {
+    std::shared_ptr<WasapiRender> s = openAsync(opt);
     if (WaitForSingleObject(s->readyEvent_, 6000) != WAIT_OBJECT_0) {
         if (error) *error = "Timed out opening render stream";
         return nullptr;
@@ -576,6 +588,8 @@ void WasapiRender::threadMain() {
                 ring_.read(scratch_.data(), static_cast<size_t>(n) * ch);
                 floatToDevice(scratch_.data(), data, static_cast<size_t>(n) * ch, format_);
                 primed = true;
+                flowTotal_ += static_cast<uint64_t>(n);
+                flow_.publish(flowTotal_, static_cast<uint32_t>(n), monotonicSeconds());
             }
             if (silence > 0)
                 std::memset(data + static_cast<size_t>(n) * format_.blockAlign, 0,

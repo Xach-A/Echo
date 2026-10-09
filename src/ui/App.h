@@ -161,6 +161,7 @@ private:
     const char* focusRequest_ = nullptr;
 
     double now_ = 0.0, lastSave_ = 0.0, lastAppRefresh_ = 0.0;
+    bool appsVisible_ = false; // Applications panel drawn last frame (per-app meters needed)
     std::string lastSavedJson_;
     float dpi_ = 1.0f;
     bool quit_ = false;

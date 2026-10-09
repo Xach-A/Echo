@@ -96,7 +96,10 @@ protected:
             std::fill(out_[c].begin(), out_[c].end(), 0.0f);
         }
         std::fill(mono_.begin(), mono_.end(), 0.0f);
-        for (auto& a : align_) a.prepare(latency_, maxBlock_);
+        for (auto& a : align_) { // sized for the widest range in onPrepare; no reallocation here
+            a.setDelay(latency_, maxBlock_);
+            a.reset();
+        }
         w_ = 0;
         markHead_ = markCount_ = 0;
         trackHead_ = trackCount_ = 0;

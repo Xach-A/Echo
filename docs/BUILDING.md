@@ -85,7 +85,11 @@ build/release/bin/echo_hwtest.exe procloop
 build/release/bin/echo_hwtest.exe sysaudio
 build/release/bin/echo_hwtest.exe cables        # needs a virtual cable driver
 build/release/bin/echo_hwtest.exe approute      # experimental per-app routing API
-build/release/bin/echo_hwtest.exe soak 60
+build/release/bin/echo_hwtest.exe soak 60       # mic + system capture + output (+ cable, silent): drift percentiles, dropouts
+build/release/bin/echo_hwtest.exe virtualmic    # Echo -> cable -> recording side, level/gaps/latency
+build/release/bin/echo_hwtest.exe cableraw 30   # same through the cable without Echo (comparison)
+build/release/bin/echo_hwtest.exe denoise 12    # noise suppression on the real mic (memory only)
+build/release/bin/echo_hwtest.exe perf          # UI-thread device work timing
 ```
 
 UI smoke test (renders every page into PNGs using a throwaway profile):
@@ -93,6 +97,26 @@ UI smoke test (renders every page into PNGs using a throwaway profile):
 ```powershell
 build/release/bin/Echo.exe --ui-snapshots=C:\temp\echo-shots
 ```
+
+### Benchmark
+
+`build/release/bin/echo_bench.exe [mixer|voice|heavy|effects] [--seconds N]`
+runs the real engine offline with in-memory devices (including rate
+conversion) and reports per-block processing time (average, p50, p99, max)
+for routing-only, single-voice, heavy multi-input and per-effect scenarios
+at 44.1/48 kHz and block sizes 64–1024. Synthetic CPU numbers, not latency.
+
+### Sanitizers
+
+```bash
+cmake -S . -B build/asan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DECHO_SANITIZE=ON -DECHO_BUILD_TOOLS=OFF
+cmake --build build/asan --target echo_tests
+# run with the LLVM-MinGW runtime DLLs on PATH (…/llvm-mingw…/x86_64-w64-mingw32/bin)
+ASAN_OPTIONS=detect_leaks=0 build/asan/bin/echo_tests.exe
+```
+
+AddressSanitizer + UndefinedBehaviorSanitizer (leak detection is not
+available on Windows; ThreadSanitizer is not supported on Windows).
 
 ## 5. Debugging
 

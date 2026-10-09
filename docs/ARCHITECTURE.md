@@ -86,6 +86,16 @@ files. Concretely:
   the UI. Exceptions never cross the audio callback (`try/catch` around each
   effect and around the block).
 * **Denormals** are flushed to zero on every real-time thread (SSE FTZ/DAZ).
+* **Effect resets** may run on the audio thread (re-enable, fault recovery),
+  so every `onReset()` is allocation-free (RNNoise is re-initialised in place
+  with `rnnoise_init`; delay lines are sized for their maximum in `prepare`).
+* **Switching effects on/off** never drops audio: a freshly enabled (or newly
+  added) effect is reset, then the dry signal is passed through for the
+  effect's latency before a 10 ms crossfade (otherwise a latent effect such as
+  noise suppression, 20 ms, would output silence for that long). A whole
+  chain's A/B bypass (strips and buses) is a 15 ms crossfade; while bypassed,
+  the chain keeps running in the background for up to 10 s so a quick A/B
+  switch back is seamless, then stops and restarts cleanly on return.
 
 ## 5. Clocking and drift
 
@@ -99,11 +109,32 @@ is available the engine falls back to a high-resolution waitable timer.
 
 All other devices pass through a variable-ratio windowed-sinc resampler
 (Kaiser window, 16/32/64 taps selectable, 512-phase table with linear phase
-interpolation). A PI controller holds each device's ring at a target fill
-(period + block + ~3 ms) by nudging the ratio (clamped to ±0.5 %). The same
-resampler performs fixed rate conversion (e.g. 44.1 kHz devices in a 48 kHz
-engine). Tests verify 44.1↔48 kHz conversion accuracy and a 200 ppm drift
-held for 60 simulated seconds without a single underrun.
+interpolation). A PI controller holds each device's buffer at a target level
+by nudging the ratio (clamped to ±0.5 %). The same resampler performs fixed
+rate conversion (e.g. 44.1 kHz devices in a 48 kHz engine).
+
+* **Sawtooth-free level estimate.** A device fills (or empties) its ring in
+  whole packets, so the ring level sampled at engine-block time is a
+  sawtooth whose phase slowly wanders with the clock difference; controlling
+  on it turns that phase into false "drift" (measured on the development
+  machine: corrections swinging by more than 1000 ppm). Each WASAPI device
+  thread therefore publishes a `FlowStamp` (frames moved, size and QPC time
+  of its newest transfer) through a lock-free sequence lock, and the engine
+  controls on the continuous estimate "ring level at the newest packet +
+  frames the device has produced since (capped at one packet)". The aim is
+  one packet above the old ring target, so the old safety margin is in the
+  ring at every packet/block phase (it used to be there only on average);
+  this costs on average half a packet (5 ms at 10 ms periods) of extra
+  buffering per drift-corrected device, which the latency estimates
+  include. A stream (re)starts exactly on its aim.
+  Simulated (300 ppm, ±1.5 ms jitter, 150 s): correction range 268–332 ppm
+  vs −64…+1404 ppm without timestamps (`tests/test_clock.cpp`).
+* **Adaptive margin.** Real devices occasionally slip a whole packet (seen
+  on this machine for the Realtek output, a USB microphone and VB-CABLE),
+  which shifts a buffer by 10 ms at once. After a dropout a device gets one
+  device period of extra buffering (up to two periods); one step is removed again
+  after 30 minutes without dropouts. Stable systems keep the lowest latency;
+  glitchy ones stop glitching after the first dropout.
 
 ## 6. Device lifecycle
 
@@ -114,6 +145,19 @@ dirty flag. The UI thread's `MixerController::update()` rescans, and every
 device is back (matched by ID, then by friendly name). The engine keeps
 running throughout; a missing input produces silence and a missing output is
 skipped. After system resume the app restarts audio cleanly.
+
+* **Asynchronous opening.** Streams are opened on their own device thread
+  (`WasapiCapture/WasapiRender::openAsync`); the controller adopts a stream
+  into the graph once it reports Running (checked every UI frame) and shows
+  "Starting..." meanwhile. A slow driver (the Realtek output takes ~0.5 s
+  here) never blocks the UI; failures report Windows' message, a device that
+  does not respond within 10 s times out, and streams abandoned while still
+  opening are parked until their thread finishes (destroying them never waits).
+* **Windows default devices.** Inputs and outputs set to "Windows default"
+  follow the user's default-device changes (they are reopened on the new
+  default when Windows notifies a change).
+* **Virtual cables** installed while Echo runs are picked up automatically by
+  an unassigned virtual (B) bus; buses the user set are never changed.
 
 ## 7. Feedback protection
 

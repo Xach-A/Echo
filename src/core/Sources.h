@@ -40,6 +40,7 @@ public:
     std::atomic<uint64_t> overruns{0};
     std::atomic<float> fillMs{0.0f};
     std::atomic<float> driftPpm{0.0f};
+    std::atomic<float> marginMs{0.0f}; // adaptive extra buffering after dropouts
     MeterState meter; // raw level of the first two channels
 
 protected:
@@ -71,9 +72,14 @@ private:
     std::vector<float> out_;  // interleaved engine frames
     int devCh_ = 0;
     int keepCh_ = 0;          // channels kept (<= kMaxSourceChannels)
-    double targetFill_ = 0.0; // device frames
+    void applyTarget();
+    double baseTarget_ = 0.0; // device frames
+    double targetFill_ = 0.0; // device frames (base + adaptive margin)
     double overflowFill_ = 0.0;
+    double overflowExtra_ = 0.0;
+    AdaptiveMargin margin_;
     bool primed_ = false;
+    uint64_t readTotal_ = 0;  // frames removed from the ring (read or skipped)
 };
 
 // Test-signal generator (sine, noise, sweep, impulse train).

@@ -70,7 +70,9 @@ std::shared_ptr<CaptureEndpoint> WasapiBackend::openCapture(const CaptureRequest
         if (error) *error = "Unsupported source type";
         return nullptr;
     }
-    return WasapiCapture::open(o, error);
+    // Opens on the stream thread; the controller adopts it once running
+    // (a slow driver never blocks the UI).
+    return WasapiCapture::openAsync(o);
 }
 
 std::shared_ptr<RenderEndpoint> WasapiBackend::openRender(const RenderRequest& req, std::string* error) {
@@ -80,7 +82,7 @@ std::shared_ptr<RenderEndpoint> WasapiBackend::openRender(const RenderRequest& r
     o.exclusive = req.exclusive;
     o.lowLatencyShared = req.lowLatency;
     o.preferredSampleRate = req.preferredRate;
-    return WasapiRender::open(o, error);
+    return WasapiRender::openAsync(o);
 }
 
 std::vector<BackendDevice> WasapiBackend::devices() {

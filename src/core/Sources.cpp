@@ -38,16 +38,30 @@ void DeviceCaptureSource::prepare(double engineRate, int maxBlock, double blockS
 
     const double period = ep_ ? std::max(1, ep_->periodFrames()) : 480;
     const double blockDev = maxBlock * ratio;
-    targetFill_ = period + blockDev + devRate * 0.003;
-    overflowFill_ = targetFill_ + std::max(4.0 * blockDev, devRate * 0.12);
+    baseTarget_ = period + blockDev + devRate * 0.003;
+    overflowExtra_ = std::max(4.0 * blockDev, devRate * 0.12);
+    // After a dropout: +1 device period (up to 2 periods); relaxes one
+    // step per 30 minutes without dropouts.
+    margin_.prepare(period, 2.0 * period, 1800.0 / std::max(1e-3, blockSeconds));
+    applyTarget();
     dc_.prepare(ratio, targetFill_, devRate, blockSeconds);
     primed_ = false;
+}
+
+void DeviceCaptureSource::applyTarget() {
+    targetFill_ = baseTarget_ + margin_.extra();
+    overflowFill_ = targetFill_ + overflowExtra_;
+    const double devRate = ep_ ? ep_->sampleRate() : engineRate_;
+    marginMs.store(static_cast<float>(margin_.extra() / devRate * 1000.0), std::memory_order_relaxed);
 }
 
 double DeviceCaptureSource::latencySeconds() const {
     if (!ep_) return 0.0;
     const double devRate = ep_->sampleRate();
-    return ep_->deviceLatencySeconds() + targetFill_ / devRate + rs_.latencyInputFrames() / devRate;
+    // With packet timestamps the ring holds targetFill_ .. +1 packet (see pull()).
+    FlowStamp st;
+    const double avgFill = targetFill_ + (ep_->flowStamp(st) ? 0.5 * std::max(1, ep_->periodFrames()) : 0.0);
+    return ep_->deviceLatencySeconds() + avgFill / devRate + rs_.latencyInputFrames() / devRate;
 }
 
 void DeviceCaptureSource::pull(int frames) {
@@ -63,14 +77,33 @@ void DeviceCaptureSource::pull(int frames) {
     size_t fill = ring.readAvailable() / static_cast<size_t>(devCh_);
     fillMs.store(static_cast<float>(fill / devRate * 1000.0), std::memory_order_relaxed);
 
+    // Drift control works on a sawtooth-free estimate of the buffer level:
+    // the ring level at the device thread's newest packet plus what the
+    // device has captured since (capped at one packet). Without packet
+    // timestamps it falls back to the ring level at block time.
+    FlowStamp st;
+    const bool stamped = ep_->flowStamp(st) && st.total >= readTotal_;
+    const double period = std::max(1, ep_->periodFrames());
+    const double ahead =
+        stamped ? std::min(static_cast<double>(st.last), std::max(0.0, ep_->flowClockNow() - st.time) * devRate) : 0.0;
+    // The estimate runs 0..1 packet above the ring level. Aiming one packet
+    // above targetFill_ keeps at least targetFill_ in the ring when the
+    // engine reads, whatever the packet/block phase (on average half a
+    // packet more buffering than controlling on the ring level; measured on
+    // real devices this removed most dropouts). `level` = ring level that
+    // puts the estimate on its aim (used when (re)starting).
+    const double ctrlTarget = stamped ? targetFill_ + period : targetFill_;
+    const double level = stamped ? ctrlTarget - ahead : targetFill_;
+
     if (!primed_) {
-        if (fill >= static_cast<size_t>(targetFill_)) {
+        if (fill >= static_cast<size_t>(level)) {
             primed_ = true;
             rs_.reset();
             dc_.reset();
-            const size_t excess = fill - static_cast<size_t>(targetFill_);
+            const size_t excess = fill - static_cast<size_t>(level);
             if (excess > 0) {
                 ring.skip(excess * devCh_);
+                readTotal_ += excess;
                 fill -= excess;
             }
         } else {
@@ -84,14 +117,20 @@ void DeviceCaptureSource::pull(int frames) {
     if (fill > static_cast<size_t>(overflowFill_)) {
         // Backlog (e.g. the engine was descheduled): drop back to the target
         // instead of letting latency grow.
-        const size_t drop = fill - static_cast<size_t>(targetFill_);
+        const size_t drop = fill - static_cast<size_t>(level);
         ring.skip(drop * devCh_);
+        readTotal_ += drop;
         fill -= drop;
         overruns.fetch_add(1, std::memory_order_relaxed);
         dc_.reset();
     }
 
-    const double ratio = dc_.update(static_cast<double>(fill));
+    // (The ring level at block time is a sawtooth whose phase wanders with
+    // the clock difference; controlling on it turns phase into false drift.)
+    double ctrlFill = static_cast<double>(fill);
+    if (stamped && st.total >= readTotal_) ctrlFill = static_cast<double>(st.total - readTotal_) + ahead;
+    dc_.setTargetFill(stamped && st.total >= readTotal_ ? ctrlTarget : targetFill_);
+    const double ratio = dc_.update(ctrlFill);
     int need = rs_.inputNeeded(frames, ratio);
     const int maxIn = static_cast<int>(in_.size() / devCh_);
     need = std::min(need, maxIn);
@@ -99,11 +138,18 @@ void DeviceCaptureSource::pull(int frames) {
     int got = need;
     if (static_cast<size_t>(need) > fill) {
         got = static_cast<int>(fill);
-        if (!sparse) underruns.fetch_add(1, std::memory_order_relaxed);
+        if (!sparse) {
+            underruns.fetch_add(1, std::memory_order_relaxed);
+            margin_.onDropout();
+            applyTarget();
+        }
         primed_ = false; // re-prime to rebuild the safety margin
+    } else if (margin_.onCleanBlock()) {
+        applyTarget();
     }
     if (got > 0) {
         ring.read(in_.data(), static_cast<size_t>(got) * devCh_);
+        readTotal_ += static_cast<uint64_t>(got);
         if (keepCh_ != devCh_) {
             for (int f = 0; f < got; ++f)
                 for (int c = 0; c < keepCh_; ++c)

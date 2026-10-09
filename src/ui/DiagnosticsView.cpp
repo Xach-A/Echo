@@ -43,7 +43,8 @@ std::string EchoApp::diagnosticReport() {
           << s.source.processName << "' status=" << s.status << " fx=" << s.chain.size();
         if (const SourceRuntime* r = mc_->sourceFor(s.id))
             o << " fill=" << r->fillMs.load() << "ms drift=" << r->driftPpm.load() << "ppm under=" << r->underruns.load()
-              << " over=" << r->overruns.load() << " latency=" << r->latencySeconds() * 1000.0 << "ms";
+              << " over=" << r->overruns.load() << " margin=+" << r->marginMs.load() << "ms latency="
+              << r->latencySeconds() * 1000.0 << "ms";
         o << "\n";
     }
     o << "Buses:\n";
@@ -52,7 +53,8 @@ std::string EchoApp::diagnosticReport() {
           << (b.isClock ? " (clock)" : "");
         if (const SinkRuntime* k = mc_->sinkFor(b.id))
             o << " fill=" << k->fillMs.load() << "ms drift=" << k->driftPpm.load() << "ppm under=" << k->underruns.load()
-              << " over=" << k->overruns.load() << " latency=" << k->latencySeconds() * 1000.0 << "ms";
+              << " over=" << k->overruns.load() << " margin=+" << k->marginMs.load() << "ms latency="
+              << k->latencySeconds() * 1000.0 << "ms";
         o << "\n";
     }
     o << "Feedback warnings: " << mc_->feedbackWarnings().size() << "\n";
@@ -108,7 +110,14 @@ void EchoApp::drawDiagnostics() {
                     ImGui::TableNextColumn();
                     if (ep) ImGui::Text("%d Hz %d ch", ep->sampleRate(), ep->channels());
                     ImGui::TableNextColumn();
-                    if (r) ImGui::Text("%.1f ms", r->fillMs.load());
+                    if (r) {
+                        ImGui::Text("%.1f ms", r->fillMs.load());
+                        if (r->marginMs.load() > 0.0f) {
+                            ImGui::SameLine();
+                            ImGui::TextDisabled("(+%.0f)", r->marginMs.load());
+                            Tip("Extra buffering added after a dropout; removed again after 30 minutes without problems.");
+                        }
+                    }
                     ImGui::TableNextColumn();
                     if (r) ImGui::Text("%+.0f ppm", r->driftPpm.load());
                     ImGui::TableNextColumn();
@@ -130,7 +139,14 @@ void EchoApp::drawDiagnostics() {
                     ImGui::TableNextColumn();
                     if (ep) ImGui::Text("%d Hz %d ch", ep->sampleRate(), ep->channels());
                     ImGui::TableNextColumn();
-                    if (k) ImGui::Text("%.1f ms", k->fillMs.load());
+                    if (k) {
+                        ImGui::Text("%.1f ms", k->fillMs.load());
+                        if (k->marginMs.load() > 0.0f) {
+                            ImGui::SameLine();
+                            ImGui::TextDisabled("(+%.0f)", k->marginMs.load());
+                            Tip("Extra buffering added after a dropout; removed again after 30 minutes without problems.");
+                        }
+                    }
                     ImGui::TableNextColumn();
                     if (k) ImGui::Text("%+.0f ppm", k->driftPpm.load());
                     ImGui::TableNextColumn();

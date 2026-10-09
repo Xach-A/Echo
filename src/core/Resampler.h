@@ -12,6 +12,8 @@
 // prepare() allocates and must not be called on the audio thread.
 #pragma once
 
+#include <algorithm>
+
 #include <vector>
 
 namespace echo {
@@ -73,6 +75,36 @@ private:
 // adjusting a resampler ratio. Works for both capture (consumer adjusts) and
 // render (producer adjusts): in both cases, a ring that is too full asks for
 // a larger in/out ratio.
+// Extra device buffering that grows after a dropout and shrinks again after a
+// long stable stretch: stable systems keep the lowest latency, while a device
+// that glitches (e.g. one that occasionally skips a whole packet) stops
+// glitching after the first dropout instead of every minute or two.
+class AdaptiveMargin {
+public:
+    void prepare(double stepFrames, double maxFrames, double relaxBlocks) {
+        step_ = stepFrames;
+        max_ = maxFrames;
+        relax_ = relaxBlocks;
+        extra_ = 0.0;
+        clean_ = 0.0;
+    }
+    double extra() const { return extra_; }
+    void onDropout() {
+        extra_ = std::min(max_, extra_ + step_);
+        clean_ = 0.0;
+    }
+    // Call once per block without a dropout; true when the margin shrank.
+    bool onCleanBlock() {
+        if (extra_ <= 0.0 || ++clean_ < relax_) return false;
+        clean_ = 0.0;
+        extra_ = std::max(0.0, extra_ - step_);
+        return true;
+    }
+
+private:
+    double step_ = 0.0, max_ = 0.0, relax_ = 1.0, extra_ = 0.0, clean_ = 0.0;
+};
+
 class DriftController {
 public:
     void prepare(double nominalRatio, double targetFillFrames, double deviceRate,

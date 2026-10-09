@@ -6,36 +6,60 @@
 
 namespace echo {
 
-namespace {
+void ChainBypass::prepare(double sampleRate, int maxBlock, bool bypassed) {
+    mix.prepare(sampleRate, 0.015);
+    mix.reset(bypassed ? 0.0f : 1.0f);
+    keepWarmSamples = static_cast<int>(sampleRate * 10.0);
+    offSamples = 0;
+    cold = false;
+    for (auto* v : {&scratchL, &scratchR, &dryL, &dryR}) v->assign(maxBlock, 0.0f);
+}
 
-// Runs a chain with a smoothed global bypass (A/B compare) crossfade.
-void runChainWithBypass(ChainRunner& runner, const ChainSnap& chain, LinearSmoother& mixSm,
-                        bool bypass, float* l, float* r, bool& mono, int n, float* dryL,
-                        float* dryR, const float* refL = nullptr, const float* refR = nullptr, int refCh = 0) {
+void ChainBypass::run(ChainRunner& runner, const ChainSnap& chain, bool bypass, float* l, float* r, bool& mono,
+                      int n, const float* refL, const float* refR, int refCh) {
     if (chain.count == 0) return;
-    mixSm.setTarget(bypass ? 0.0f : 1.0f);
-    const bool fading = mixSm.isSmoothing();
-    if (!fading && mixSm.current() <= 0.0f) return; // fully bypassed
-
+    mix.setTarget(bypass ? 0.0f : 1.0f);
+    const bool fading = mix.isSmoothing();
+    if (!fading && mix.current() <= 0.0f) {
+        // Fully bypassed: the output is the dry signal. Keep the effects
+        // processing a copy for up to 10 s so a quick A/B switch back has no
+        // stale tails or start-up gap; then stop and restart them on return.
+        if (offSamples < keepWarmSamples) {
+            offSamples += n;
+            std::memcpy(scratchL.data(), l, sizeof(float) * n);
+            std::memcpy(scratchR.data(), mono ? l : r, sizeof(float) * n);
+            bool m = mono;
+            runner.process(chain, scratchL.data(), scratchR.data(), m, n, refL, refR, refCh);
+        } else {
+            cold = true;
+        }
+        return;
+    }
+    if (cold) {
+        // Restart every effect like a fresh switch-on: reset, then pass the
+        // dry signal through its latency before fading it in.
+        for (int i = 0; i < chain.count; ++i)
+            if (Effect* fx = chain.fx[i]) {
+                fx->rtActiveMix = 0.0f;
+                fx->rtWarmup = -1;
+            }
+        cold = false;
+    }
+    offSamples = 0;
     if (!fading) {
         runner.process(chain, l, r, mono, n, refL, refR, refCh);
         return;
     }
     const bool monoBefore = mono;
-    std::memcpy(dryL, l, sizeof(float) * n);
-    std::memcpy(dryR, monoBefore ? l : r, sizeof(float) * n);
+    std::memcpy(dryL.data(), l, sizeof(float) * n);
+    std::memcpy(dryR.data(), monoBefore ? l : r, sizeof(float) * n);
     runner.process(chain, l, r, mono, n, refL, refR, refCh);
-    if (monoBefore && !mono) {
-        // chain widened: dry R is the mono signal
-    }
     for (int i = 0; i < n; ++i) {
-        const float m = mixSm.next();
+        const float m = mix.next();
         l[i] = dryL[i] + (l[i] - dryL[i]) * m;
         if (!mono) r[i] = dryR[i] + (r[i] - dryR[i]) * m;
     }
 }
-
-} // namespace
 
 StripRuntime::StripRuntime() {
     for (auto& s : sends) s.gain.reset(0.0f);
@@ -43,20 +67,18 @@ StripRuntime::StripRuntime() {
 
 void StripRuntime::prepare(double sampleRate, int maxBlock) {
     sr_ = sampleRate;
-    for (auto* v : {&l_, &r_, &preL_, &preR_, &postL_, &postR_, &dryL_, &dryR_})
-        v->assign(maxBlock, 0.0f);
+    for (auto* v : {&l_, &r_, &preL_, &preR_, &postL_, &postR_}) v->assign(maxBlock, 0.0f);
     trimSm_.prepare(sampleRate, 0.02);
     faderSm_.prepare(sampleRate, 0.02);
     panLSm_.prepare(sampleRate, 0.02);
     panRSm_.prepare(sampleRate, 0.02);
     muteSm_.prepare(sampleRate, 0.01);
-    fxMixSm_.prepare(sampleRate, 0.015);
+    bypass_.prepare(sampleRate, maxBlock, fxBypass.load());
     trimSm_.reset(dbToGain(trimDb.load()));
     faderSm_.reset(dbToGain(faderDb.load()));
     panLSm_.reset(1.0f);
     panRSm_.reset(1.0f);
     muteSm_.reset(mute.load() ? 0.0f : 1.0f);
-    fxMixSm_.reset(fxBypass.load() ? 0.0f : 1.0f);
     for (auto& s : sends) {
         s.gain.prepare(sampleRate, 0.02);
         s.gain.reset(s.enabled.load() && !s.blocked.load() ? dbToGain(s.gainDb.load()) : 0.0f);
@@ -119,8 +141,7 @@ void StripRuntime::process(const SourceRuntime* src, const ChainSnap& chain, int
         refL = reference->channel(0);
         refR = reference->channel(refCh - 1);
     }
-    runChainWithBypass(chainRunner, chain, fxMixSm_, fxBypass.load(std::memory_order_relaxed), L, R,
-                       mono, n, dryL_.data(), dryR_.data(), refL, refR, refCh);
+    bypass_.run(chainRunner, chain, fxBypass.load(std::memory_order_relaxed), L, R, mono, n, refL, refR, refCh);
     if (mono) std::memcpy(R, L, sizeof(float) * n);
 
     // --- fader / pan / mute ---
@@ -198,12 +219,14 @@ void BusRuntime::prepare(double sampleRate, int maxBlock) {
     muteSm_.reset(mute.load() ? 0.0f : 1.0f);
     limiter_.prepare(sampleRate, 0.001, 2);
     limiter_.setReleaseSeconds(0.06f);
+    bypass_.prepare(sampleRate, maxBlock, fxBypass.load());
     chainRunner.prepare(maxBlock);
 }
 
 void BusRuntime::process(const ChainSnap& chain, float* l, float* r, int n) {
     bool mono = false;
-    if (chain.count > 0 && !fxBypass.load(std::memory_order_relaxed)) chainRunner.process(chain, l, r, mono, n);
+    // Crossfaded like strip chains (an abrupt switch used to click).
+    bypass_.run(chainRunner, chain, fxBypass.load(std::memory_order_relaxed), l, r, mono, n);
     if (mono) std::memcpy(r, l, sizeof(float) * n);
 
     if (this->mono.load(std::memory_order_relaxed)) {

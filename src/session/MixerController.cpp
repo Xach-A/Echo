@@ -1,6 +1,7 @@
 #include "session/MixerController.h"
 
 #include <algorithm>
+#include <chrono>
 #include <set>
 
 #include "core/Log.h"
@@ -19,6 +20,10 @@ ChainSnap makeChainSnap(const std::vector<std::shared_ptr<Effect>>& chain) {
         c.fx[c.count++] = e.get();
     }
     return c;
+}
+
+double steadySeconds() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 bool endpointDead(EndpointStatus s) {
@@ -77,6 +82,10 @@ void MixerController::stop() {
     engine_.stop();
     engine_.publish(nullptr);
     engine_.collectGarbage();
+    for (auto& [k, e] : sources_)
+        if (e.pending) retireEndpoint(std::move(e.endpoint));
+    for (auto& [k, e] : sinks_)
+        if (e.pending) retireEndpoint(std::move(e.endpoint));
     sources_.clear();
     sinks_.clear();
     started_ = false;
@@ -105,8 +114,11 @@ void MixerController::update(double now) {
     bool rebuild = false;
     if (backend_.pollDeviceChanges()) {
         rebuild = true;
+        followDefaultDevices();
         assignCablesToEmptyVirtualBuses();
     }
+    // Every frame (cheap): streams that finished opening join the graph at once.
+    if (finishPendingOpens()) rebuild = true;
 
     // Health check twice a second: dead streams, retries, vanished apps.
     if (now - lastHealthCheck_ >= 0.5) {
@@ -120,7 +132,7 @@ void MixerController::update(double now) {
                 e.runtime.reset();
                 e.nextRetry = now + 1.0;
                 rebuild = true;
-            } else if (!e.runtime && e.used && now >= e.nextRetry) {
+            } else if (!e.runtime && !e.pending && e.used && now >= e.nextRetry) {
                 rebuild = true;
             } else if (e.ref.kind == SourceKind::ProcessLoopback && e.ref.processId &&
                        !backend_.processAlive(e.ref.processId)) {
@@ -140,7 +152,7 @@ void MixerController::update(double now) {
                 e.runtime.reset();
                 e.nextRetry = now + 1.0;
                 rebuild = true;
-            } else if (!e.runtime && e.used && now >= e.nextRetry) {
+            } else if (!e.runtime && !e.pending && e.used && now >= e.nextRetry) {
                 rebuild = true;
             }
         }
@@ -163,6 +175,7 @@ MixerController::SourceEntry* MixerController::ensureSource(SourceRef& ref) {
         e.error.clear();
         return &e;
     }
+    if (e.pending) return &e;
     if (e.runtime && e.endpoint && !endpointDead(e.endpoint->status())) return &e;
     if (now_ < e.nextRetry) return &e;
 
@@ -230,20 +243,39 @@ MixerController::SourceEntry* MixerController::ensureSource(SourceRef& ref) {
         ECHO_LOG_WARN("Cannot open input '%s': %s", req.label.c_str(), e.error.c_str());
         return &e;
     }
-    auto rt = std::make_shared<DeviceCaptureSource>(ep, session_.engine.resamplerQuality);
-    rt->key = ref.key();
-    rt->prepare(engine_.sampleRate(), engine_.blockSize(), engine_.blockSeconds());
     e.endpoint = ep;
+    if (ref.kind == SourceKind::ProcessLoopback) e.ref.processId = req.processId;
+    if (ep->status() == EndpointStatus::Starting) {
+        e.pending = true;
+        e.openedAt = steadySeconds();
+        e.error = "Starting...";
+        return &e;
+    }
+    adoptCapture(e);
+    return &e;
+}
+
+void MixerController::adoptCapture(SourceEntry& e) {
+    if (e.endpoint->status() != EndpointStatus::Running) {
+        e.error = e.endpoint->lastError();
+        if (e.error.empty()) e.error = "Cannot open device";
+        ECHO_LOG_WARN("Cannot open input '%s': %s", e.endpoint->describe().c_str(), e.error.c_str());
+        e.endpoint.reset();
+        e.nextRetry = now_ + 3.0;
+        return;
+    }
+    auto rt = std::make_shared<DeviceCaptureSource>(e.endpoint, session_.engine.resamplerQuality);
+    rt->key = e.ref.key();
+    rt->prepare(engine_.sampleRate(), engine_.blockSize(), engine_.blockSeconds());
     e.runtime = rt;
     e.error.clear();
-    if (ref.kind == SourceKind::ProcessLoopback) e.ref.processId = req.processId;
-    return &e;
 }
 
 MixerController::SinkEntry* MixerController::ensureSink(const OutputRef& ref) {
     SinkEntry& e = sinks_[ref.key()];
     e.used = true;
     e.ref = ref;
+    if (e.pending) return &e;
     if (e.runtime && e.endpoint && !endpointDead(e.endpoint->status())) return &e;
     if (now_ < e.nextRetry) return &e;
     const std::string id = ref.deviceId.empty() ? backend_.defaultDevice(true)
@@ -270,13 +302,95 @@ MixerController::SinkEntry* MixerController::ensureSink(const OutputRef& ref) {
         return &e;
     }
     e.resolvedId = id;
-    auto rt = std::make_shared<DeviceRenderSink>(ep, session_.engine.resamplerQuality);
-    rt->key = ref.key();
-    rt->prepare(engine_.sampleRate(), engine_.blockSize(), engine_.blockSeconds());
     e.endpoint = ep;
+    if (ep->status() == EndpointStatus::Starting) {
+        e.pending = true;
+        e.openedAt = steadySeconds();
+        e.error = "Starting...";
+        return &e;
+    }
+    adoptRender(e);
+    return &e;
+}
+
+void MixerController::adoptRender(SinkEntry& e) {
+    if (e.endpoint->status() != EndpointStatus::Running) {
+        e.error = e.endpoint->lastError();
+        if (e.error.empty()) e.error = "Cannot open device";
+        ECHO_LOG_WARN("Cannot open output '%s': %s", e.endpoint->describe().c_str(), e.error.c_str());
+        e.endpoint.reset();
+        e.nextRetry = now_ + 3.0;
+        return;
+    }
+    auto rt = std::make_shared<DeviceRenderSink>(e.endpoint, session_.engine.resamplerQuality);
+    rt->key = e.ref.key();
+    rt->prepare(engine_.sampleRate(), engine_.blockSize(), engine_.blockSeconds());
     e.runtime = rt;
     e.error.clear();
-    return &e;
+}
+
+bool MixerController::finishPendingOpens() {
+    const double t = steadySeconds();
+    bool changed = false;
+    auto settle = [&](auto& e, auto adopt) {
+        if (!e.pending) return;
+        if (e.endpoint && e.endpoint->status() == EndpointStatus::Starting) {
+            if (t - e.openedAt < openTimeout_) return;
+            ECHO_LOG_WARN("Opening '%s' timed out", e.endpoint->describe().c_str());
+            retireEndpoint(std::move(e.endpoint));
+            e.error = "The device did not respond (timed out)";
+            e.nextRetry = now_ + 5.0;
+        } else if (e.endpoint) {
+            adopt(e);
+        }
+        e.pending = false;
+        changed = true;
+    };
+    for (auto& [key, e] : sources_) settle(e, [this](SourceEntry& s) { adoptCapture(s); });
+    for (auto& [key, e] : sinks_) settle(e, [this](SinkEntry& s) { adoptRender(s); });
+    auto reap = [](auto& v) {
+        v.erase(std::remove_if(v.begin(), v.end(),
+                               [](const auto& ep) { return ep->status() != EndpointStatus::Starting; }),
+                v.end());
+    };
+    reap(retiredCaptures_);
+    reap(retiredRenders_);
+    return changed;
+}
+
+bool MixerController::followDefaultDevices() {
+    bool moved = false;
+    auto release = [&](auto& e, const char* what) {
+        ECHO_LOG_INFO("Windows default %s changed; switching '%s'", what, e.ref.deviceName.c_str());
+        if (e.pending) retireEndpoint(std::move(e.endpoint));
+        e.pending = false;
+        e.endpoint.reset();
+        e.runtime.reset();
+        e.resolvedId.clear();
+        e.nextRetry = 0.0;
+        e.error = "Switching to the new default device";
+        moved = true;
+    };
+    for (auto& [key, e] : sources_) {
+        if (!e.ref.deviceId.empty() || e.resolvedId.empty()) continue;
+        if (e.ref.kind != SourceKind::CaptureDevice && e.ref.kind != SourceKind::RenderLoopback) continue;
+        const std::string def = backend_.defaultDevice(e.ref.kind == SourceKind::RenderLoopback);
+        if (!def.empty() && def != e.resolvedId) release(e, "recording device");
+    }
+    for (auto& [key, e] : sinks_) {
+        if (!e.ref.deviceId.empty() || e.resolvedId.empty()) continue;
+        const std::string def = backend_.defaultDevice(true);
+        if (!def.empty() && def != e.resolvedId) release(e, "playback device");
+    }
+    return moved;
+}
+
+void MixerController::retireEndpoint(std::shared_ptr<CaptureEndpoint> ep) {
+    if (ep && ep->status() == EndpointStatus::Starting) retiredCaptures_.push_back(std::move(ep));
+}
+
+void MixerController::retireEndpoint(std::shared_ptr<RenderEndpoint> ep) {
+    if (ep && ep->status() == EndpointStatus::Starting) retiredRenders_.push_back(std::move(ep));
 }
 
 // ---------------------------------------------------------------------------
@@ -433,8 +547,22 @@ void MixerController::rebuildGraph() {
 
     // Drop entries nobody references; the retired snapshot keeps their
     // runtimes alive until the engine has moved on.
-    for (auto it = sources_.begin(); it != sources_.end();) it = it->second.used ? std::next(it) : sources_.erase(it);
-    for (auto it = sinks_.begin(); it != sinks_.end();) it = it->second.used ? std::next(it) : sinks_.erase(it);
+    for (auto it = sources_.begin(); it != sources_.end();) {
+        if (it->second.used) {
+            ++it;
+            continue;
+        }
+        if (it->second.pending) retireEndpoint(std::move(it->second.endpoint));
+        it = sources_.erase(it);
+    }
+    for (auto it = sinks_.begin(); it != sinks_.end();) {
+        if (it->second.used) {
+            ++it;
+            continue;
+        }
+        if (it->second.pending) retireEndpoint(std::move(it->second.endpoint));
+        it = sinks_.erase(it);
+    }
 }
 
 void MixerController::applySnapshot(std::unique_ptr<GraphSnapshot> g) {

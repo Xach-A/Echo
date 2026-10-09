@@ -325,7 +325,8 @@ void EchoApp::frame(double now, double dt) {
         backend_->sessions().refresh();
         lastAppRefresh_ = now;
     }
-    backend_->sessions().updateLevels();
+    if (appsVisible_) backend_->sessions().updateLevels(); // only while someone can see them
+    appsVisible_ = false;
     if (cableTestRunning_ && cableTestFuture_.valid() &&
         cableTestFuture_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         cableTestResult_ = cableTestFuture_.get();

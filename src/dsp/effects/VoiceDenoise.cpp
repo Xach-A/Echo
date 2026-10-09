@@ -131,10 +131,10 @@ protected:
     }
 
     void onReset() override {
-        for (auto*& s : st_) {
-            if (s) rnnoise_destroy(s);
-            s = rnnoise_create(nullptr);
-        }
+        // Re-initialise in place: may run on the audio thread (re-enable,
+        // fault recovery), so no allocation here.
+        for (auto* s : st_)
+            if (s) rnnoise_init(s, nullptr);
         for (int c = 0; c < 2; ++c) {
             in48_[c].r = in48_[c].w = 0;
             out48_[c].r = out48_[c].w = 0;

@@ -28,7 +28,9 @@ public:
     bool isSparse() const override { return sparse_; }
     double deviceLatencySeconds() const override { return 0.01; }
     const std::string& describe() const override { return desc_; }
+    std::string lastError() const override { return error_; }
     EndpointStatus status_ = EndpointStatus::Running;
+    std::string error_;
 
     // Produce `frames` frames of a sine (all channels; channel c is scaled
     // by 1/(c+1) so channel mapping can be verified).
@@ -63,6 +65,8 @@ public:
     EndpointStatus status() const override { return status_; }
     double deviceLatencySeconds() const override { return 0.01; }
     const std::string& describe() const override { return desc_; }
+    std::string lastError() const override { return error_; }
+    std::string error_;
     void setWakeTarget(WakeTarget* t, int threshold) override {
         wake_ = t;
         threshold_ = threshold;
@@ -99,6 +103,7 @@ public:
     std::map<std::string, std::shared_ptr<FakeRender>> renders;
     uint64_t gen = 1;
     bool changed = false;
+    bool asyncOpen = false; // endpoints start in status Starting (like real WASAPI opening)
     int openCaptureCalls = 0, openRenderCalls = 0;
 
     void addDevice(const std::string& id, const std::string& name, bool render, int ch = 2, int rate = 48000,
@@ -140,6 +145,7 @@ public:
             return nullptr;
         }
         auto c = std::make_shared<FakeCapture>(ch, rate, 480, req.kind != SourceKind::CaptureDevice);
+        if (asyncOpen) c->status_ = EndpointStatus::Starting; // test flips it later
         captures[id] = c;
         return c;
     }
@@ -151,6 +157,7 @@ public:
             return nullptr;
         }
         auto r = std::make_shared<FakeRender>(d->channels, d->rate);
+        if (asyncOpen) r->status_ = EndpointStatus::Starting;
         renders[req.deviceId] = r;
         return r;
     }

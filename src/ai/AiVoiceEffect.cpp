@@ -7,6 +7,8 @@
 
 #include <chrono>
 #include <cstring>
+#include <iterator>
+#include <limits>
 
 #include "core/Log.h"
 #include "dsp/EffectRegistry.h"
@@ -153,6 +155,7 @@ void AiVoiceEffect::processImpl(float* const* ch, int numCh, int n) {
     if (!lastActive_ || wantLatency != latency_) {
         // (Re)start the stream alignment (no allocation here).
         latency_ = wantLatency;
+        latencyPub_.store(latency_, std::memory_order_relaxed);
         for (auto& d : dryDelay_) d.setDelay(latency_, maxBlock_);
         onReset();
         lastActive_ = true;
@@ -194,13 +197,20 @@ void AiVoiceEffect::processImpl(float* const* ch, int numCh, int n) {
     }
     const float mix = p(1) / 100.0f;
     const float step = 1.0f / static_cast<float>(sr_ * 0.01);
+    int skipped = 0;
     for (int i = 0; i < n; ++i) {
-        const bool haveWet = i >= firstWet && i < firstWet + have;
+        // NaN marks audio the overloaded worker skipped: fall back to dry.
+        bool haveWet = i >= firstWet && i < firstWet + have;
+        if (haveWet && !(wet[i] == wet[i])) {
+            haveWet = false;
+            ++skipped;
+        }
         const float target = haveWet ? mix : 0.0f;
         wetGain_ = target > wetGain_ ? std::min(target, wetGain_ + step) : std::max(target, wetGain_ - step);
         const float w = haveWet ? wet[i] : 0.0f;
         for (int c = 0; c < numCh; ++c) ch[c][i] = dry_[c][i] * (1.0f - wetGain_) + w * wetGain_;
     }
+    if (skipped > 0) underrunSamples.fetch_add(static_cast<uint64_t>(skipped), std::memory_order_relaxed);
 }
 
 void AiVoiceEffect::workerMain() {
@@ -286,6 +296,32 @@ void AiVoiceEffect::workerMain() {
         bool worked = false;
         while (!stop_.load() && !modelDirty_.load() && inRing_.readAvailable() >= static_cast<size_t>(chunkEng) &&
                syncRequest_.load() == ack) {
+            // Overload: input older than the latency budget can no longer be
+            // played in time (the audio thread would discard the result), so
+            // skip to the newest chunk instead of working through a stale
+            // backlog. The skipped stretch is marked (NaN) so the audio
+            // thread falls back to the dry voice there and counts it.
+            const size_t backlog = inRing_.readAvailable();
+            const size_t budget = static_cast<size_t>(chunkEng) + static_cast<size_t>(std::max(0, latencyPub_.load()));
+            if (backlog > budget) {
+                const size_t skip = backlog - static_cast<size_t>(chunkEng);
+                inRing_.skip(skip);
+                size_t left = skip;
+                const float marker = std::numeric_limits<float>::quiet_NaN();
+                float marks[256];
+                std::fill(std::begin(marks), std::end(marks), marker);
+                while (left > 0 && outRing_.writeAvailable() > 0) {
+                    const size_t k = std::min<size_t>(left, 256);
+                    outRing_.write(marks, k);
+                    left -= k;
+                }
+                // The stream restarts after the gap.
+                down.reset();
+                up.reset();
+                std::fill(history.begin(), history.end(), 0.0f);
+                haveTail = false;
+                skippedSamples.fetch_add(skip);
+            }
             chunkIn.resize(chunkEng);
             inRing_.read(chunkIn.data(), chunkEng);
             down.push(chunkIn.data(), chunkEng);
@@ -308,6 +344,8 @@ void AiVoiceEffect::workerMain() {
                 model.reset();
                 break;
             }
+            if (const int extra = testDelayMs_.load(); extra > 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(extra));
             const double ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
             avgMs = chunksProcessed.load() == 0 ? static_cast<float>(ms) : avgMs * 0.9f + static_cast<float>(ms) * 0.1f;
             inferenceMs = avgMs;

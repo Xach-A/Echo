@@ -16,6 +16,7 @@ void EchoApp::drawApps() {
         ImGui::End();
         return;
     }
+    appsVisible_ = true;
     const Palette& p = pal();
     if (!backend_->processLoopbackSupported())
         ImGui::TextColored(toVec4(p.warn), ICON_WARNING " Per-application capture requires Windows 10 version 2004 or newer.");

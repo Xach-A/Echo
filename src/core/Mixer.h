@@ -34,6 +34,20 @@ struct BusAccumulators {
     bool used[kMaxBuses] = {};
 };
 
+// Whole-chain bypass (A/B compare) with a short crossfade. While bypassed
+// the chain keeps running in the background for a while, so switching back
+// is seamless; after that it stops (saving CPU) and restarts cleanly.
+struct ChainBypass {
+    LinearSmoother mix;
+    int offSamples = 0;
+    int keepWarmSamples = 0;
+    bool cold = false;
+    std::vector<float> scratchL, scratchR, dryL, dryR;
+    void prepare(double sampleRate, int maxBlock, bool bypassed);
+    void run(ChainRunner& runner, const ChainSnap& chain, bool bypass, float* l, float* r, bool& mono, int n,
+             const float* refL = nullptr, const float* refR = nullptr, int refCh = 0);
+};
+
 class StripRuntime : NonCopyable {
 public:
     StripRuntime();
@@ -71,8 +85,9 @@ public:
 
 private:
     double sr_ = 48000.0;
-    LinearSmoother trimSm_, faderSm_, panLSm_, panRSm_, muteSm_, fxMixSm_;
-    std::vector<float> l_, r_, preL_, preR_, postL_, postR_, dryL_, dryR_;
+    LinearSmoother trimSm_, faderSm_, panLSm_, panRSm_, muteSm_;
+    ChainBypass bypass_;
+    std::vector<float> l_, r_, preL_, preR_, postL_, postR_;
 };
 
 class BusRuntime : NonCopyable {
@@ -95,6 +110,7 @@ public:
 
 private:
     LinearSmoother faderSm_, muteSm_;
+    ChainBypass bypass_;
     LookaheadLimiter limiter_;
     double sr_ = 48000.0;
 };

@@ -106,6 +106,9 @@ public:
     // Audio-thread-only bypass crossfade position (1 = active, 0 = bypassed,
     // negative = not yet initialised). Managed by ChainRunner.
     float rtActiveMix = -1.0f;
+    // Audio-thread-only: samples left until a (re)started effect's output is
+    // valid (its latency); the dry signal is passed until then. -1 = idle.
+    int rtWarmup = -1;
 
     // Live values published by the audio thread for UI display (gain
     // reduction, detected pitch, gate state, ...). Meaning is per effect;

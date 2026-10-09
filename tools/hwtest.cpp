@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "audio/AppRouting.h"
+#include "audio/AppSessions.h"
 #include "audio/DeviceManager.h"
 #include "audio/VirtualCables.h"
 #include "audio/WasapiStream.h"
@@ -533,6 +534,26 @@ void cmdVirtualMic(DeviceManager& dm) {
     measureChirpLatency("Echo output -> virtual mic recording side", *tone, *mem, 48000.0);
 }
 
+// UI-thread work that touches Windows audio: how long one call takes.
+void cmdPerf(DeviceManager& dm) {
+    auto time = [](const char* what, int reps, auto fn) {
+        std::vector<double> ms;
+        for (int i = 0; i < reps; ++i) {
+            const auto t0 = std::chrono::steady_clock::now();
+            fn();
+            ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        }
+        std::sort(ms.begin(), ms.end());
+        std::printf("  %-48s median %7.2f ms   max %7.2f ms   (%d calls)\n", what, ms[ms.size() / 2], ms.back(), reps);
+    };
+    time("device list rescan (Rescan / device change)", 20, [&] { dm.rescan(); });
+    time("virtual cable pairing", 20, [&] { (void)findCablePairs(dm.devices()); });
+    AppSessionMonitor apps;
+    time("per-app audio sessions refresh (every 1 s)", 20, [&] { apps.refresh(); });
+    time("per-app level meters update (every frame)", 200, [&] { apps.updateLevels(); });
+    result("UI-thread device work timing", 1, "see the lines above");
+}
+
 // Comparison for `virtualmic`: the same tone through the cable WITHOUT Echo's
 // engine (plain WASAPI streams, `queueMs` queued on the playback side), to
 // tell gaps caused by the cable driver apart from gaps caused by Echo.
@@ -835,6 +856,17 @@ void cmdSoak(DeviceManager& dm, double seconds) {
         result("soak", -1, "could not open devices: " + err);
         return;
     }
+    // A virtual cable, if installed, as a second (drift-corrected) output.
+    // Only silence is sent to it.
+    std::shared_ptr<WasapiRender> cable;
+    for (const auto& d : dm.devices(Flow::Render, true))
+        if (d.virtualKind == VirtualKind::Cable && d.name.find("16ch") == std::string::npos) {
+            StreamOptions co;
+            co.deviceId = d.id;
+            co.label = d.name;
+            cable = WasapiRender::open(co, &err);
+            if (cable) break;
+        }
     EngineRig rig(48000, 480);
     auto micSrc = std::make_shared<DeviceCaptureSource>(mic);
     int sMic = rig.addSource(micSrc);
@@ -854,28 +886,74 @@ void cmdSoak(DeviceManager& dm, double seconds) {
     int kMem = rig.addSink(mem);
     rig.addBus(kDev); // silent: nothing is routed to the speakers
     rig.addBus(kMem);
+    std::shared_ptr<DeviceRenderSink> cableSink;
+    if (cable) {
+        cableSink = std::make_shared<DeviceRenderSink>(cable);
+        rig.addBus(rig.addSink(cableSink)); // silent
+    }
     m->sends[1].enabled = true;
     rig.go();
-    std::printf("Soak: mic + system capture + output for %.0f s (nothing audible is played)...\n", seconds);
+    std::printf("Soak: mic + system capture + output%s for %.0f s (nothing audible is played)...\n",
+                cable ? " + virtual cable (silence)" : "", seconds);
     float maxLoad = 0;
-    for (int i = 0; i < static_cast<int>(seconds); ++i) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-        maxLoad = std::max(maxLoad, rig.engine.stats().cpuPeak.exchange(0.0f));
-        mem->rewind();
-        if ((i + 1) % 15 == 0)
+    std::vector<float> micPpm, micFill, cabPpm, cabFill;
+    const int samples = static_cast<int>(seconds * 20);
+    for (int i = 0; i < samples; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (i % 20 == 19) {
+            maxLoad = std::max(maxLoad, rig.engine.stats().cpuPeak.exchange(0.0f));
+            mem->rewind();
+        }
+        if (std::getenv("ECHO_SOAK_TRACE") && i >= 100)
+            std::printf("T %.2f mic %+.0f ppm %.1f ms cable %+.0f ppm %.1f ms\n", i / 20.0, micSrc->driftPpm.load(),
+                        micSrc->fillMs.load(), cableSink ? cableSink->driftPpm.load() : 0.0f,
+                        cableSink ? cableSink->fillMs.load() : 0.0f);
+        if (i >= 100) { // after 5 s of settling
+            micPpm.push_back(micSrc->driftPpm.load());
+            micFill.push_back(micSrc->fillMs.load());
+            if (cableSink) {
+                cabPpm.push_back(cableSink->driftPpm.load());
+                cabFill.push_back(cableSink->fillMs.load());
+            }
+        }
+        if ((i + 1) % 300 == 0)
             std::printf("  %3d s: mic fill %.1f ms drift %+.0f ppm under %llu over %llu | out fill %.1f ms under %llu | DSP %.2f%%\n",
-                        i + 1, micSrc->fillMs.load(), micSrc->driftPpm.load(), (unsigned long long)micSrc->underruns.load(),
-                        (unsigned long long)micSrc->overruns.load(), devSink->fillMs.load(),
-                        (unsigned long long)ren->stats.underruns.load(), rig.engine.stats().cpuLoad.load() * 100.0f);
+                        (i + 1) / 20, micSrc->fillMs.load(), micSrc->driftPpm.load(),
+                        (unsigned long long)micSrc->underruns.load(), (unsigned long long)micSrc->overruns.load(),
+                        devSink->fillMs.load(), (unsigned long long)ren->stats.underruns.load(),
+                        rig.engine.stats().cpuLoad.load() * 100.0f);
     }
     rig.engine.stop();
+    auto pct = [](std::vector<float> v, const char* what, const char* unit) {
+        if (v.empty()) return;
+        std::sort(v.begin(), v.end());
+        auto at = [&](double q) { return v[std::min(v.size() - 1, static_cast<size_t>(q * v.size()))]; };
+        std::printf("  %-26s min %+8.1f  p1 %+8.1f  p50 %+8.1f  p99 %+8.1f  max %+8.1f %s\n", what, v.front(), at(0.01),
+                    at(0.5), at(0.99), v.back(), unit);
+    };
+    pct(micPpm, "mic drift correction", "ppm");
+    pct(micFill, "mic buffer level", "ms");
+    pct(cabPpm, "cable output drift corr.", "ppm");
+    pct(cabFill, "cable output buffer level", "ms");
     const uint64_t dropouts = micSrc->underruns.load() + micSrc->overruns.load() + ren->stats.underruns.load() +
                               devSink->underruns.load() + devSink->overruns.load() +
-                              (sysSrc ? sysSrc->overruns.load() : 0);
-    char buf[300];
-    std::snprintf(buf, sizeof(buf), "%.0f s, %llu engine blocks, %llu dropouts, final mic drift %+.0f ppm, peak block load %.1f%%",
+                              (sysSrc ? sysSrc->overruns.load() : 0) +
+                              (cableSink ? cableSink->underruns.load() + cableSink->overruns.load() +
+                                               cable->stats.underruns.load()
+                                         : 0);
+    char buf[600];
+    std::snprintf(buf, sizeof(buf),
+                  "%.0f s, %llu engine blocks, %llu dropouts (mic under %llu over %llu, out device %llu, out ring "
+                  "%llu/%llu, system over %llu, cable %llu/%llu device %llu), peak block load %.1f%%",
                   seconds, (unsigned long long)rig.engine.stats().blocks.load(), (unsigned long long)dropouts,
-                  micSrc->driftPpm.load(), maxLoad * 100.0f);
+                  (unsigned long long)micSrc->underruns.load(), (unsigned long long)micSrc->overruns.load(),
+                  (unsigned long long)ren->stats.underruns.load(), (unsigned long long)devSink->underruns.load(),
+                  (unsigned long long)devSink->overruns.load(), (unsigned long long)(sysSrc ? sysSrc->overruns.load() : 0),
+                  (unsigned long long)(cableSink ? cableSink->underruns.load() : 0),
+                  (unsigned long long)(cableSink ? cableSink->overruns.load() : 0),
+                  (unsigned long long)(cable ? cable->stats.underruns.load() : 0), maxLoad * 100.0f);
+    std::printf("  adaptive margin at the end: mic %.1f ms, cable %.1f ms\n", micSrc->marginMs.load(),
+                cableSink ? cableSink->marginMs.load() : 0.0f);
     result("soak (long-running stability on real devices)", dropouts == 0 ? 1 : -1, buf);
 }
 
@@ -924,6 +1002,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (cmd == L"sysaudio" || cmd == L"all") cmdSysAudio(dm);
     if (cmd == L"approute") cmdAppRoute(dm);
+    if (cmd == L"perf") cmdPerf(dm);
     if (cmd == L"cableraw") cmdCableRaw(dm, argc > 2 ? _wtoi(argv[2]) : 15, argc > 3 ? _wtof(argv[3]) : 40.0);
     if (cmd == L"soak") cmdSoak(dm, argc > 2 ? _wtof(argv[2]) : 60.0);
     if (cmd == L"denoise") cmdDenoise(dm, argc > 2 ? _wtof(argv[2]) : 10.0);

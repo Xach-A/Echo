@@ -147,3 +147,62 @@ TEST_CASE("ai: the selected model is saved with the effect's state") {
     e.loadState("my-voice|gpu");
     CHECK(e.saveState() == "my-voice|gpu");
 }
+
+TEST_CASE("ai: overload (inference slower than real time) stays bounded and recovers quickly") {
+    auto& rt = ai::OrtRuntime::instance();
+    std::string err;
+    if (!rt.ensureLoaded(&err)) {
+        MESSAGE("SKIPPED: ONNX Runtime not installed next to the tests (" << err << ")");
+        return;
+    }
+    ai::ModelManifest m;
+    REQUIRE(ai::loadManifest(dataDir("echo-test-lowpass"), m)); // 160 ms chunks
+    ai::AiVoiceEffect e;
+    e.prepare(48000, 480);
+    e.setParam("latency", 400.0f);
+    e.setModel(m, false);
+    for (int i = 0; i < 300 && e.status() != ai::AiStatus::Running; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    REQUIRE(e.status() == ai::AiStatus::Running);
+
+    std::vector<float> l(480), r(480), out;
+    double maxCallMs = 0.0;
+    int t = 0;
+    auto run = [&](int blocks) {
+        for (int b = 0; b < blocks; ++b, ++t) {
+            for (int i = 0; i < 480; ++i) {
+                const double s = (t * 480 + i) / 48000.0;
+                l[i] = r[i] = static_cast<float>(0.3 * std::sin(2 * kPiD * 440.0 * s) + 0.3 * std::sin(2 * kPiD * 5000.0 * s));
+            }
+            float* ch[2] = {l.data(), r.data()};
+            const auto t0 = std::chrono::steady_clock::now();
+            e.process(ch, 2, 480);
+            maxCallMs = std::max(maxCallMs, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+            out.insert(out.end(), l.begin(), l.end());
+            std::this_thread::sleep_for(std::chrono::milliseconds(10)); // paced like a device
+        }
+    };
+    run(200);                               // 2 s normal
+    const uint64_t under0 = e.underrunSamples.load();
+    e.setArtificialDelayForTesting(400);    // ~2.5x real time: cannot keep up
+    run(300);                               // 3 s overloaded
+    const uint64_t under1 = e.underrunSamples.load(), skipped1 = e.skippedSamples.load();
+    const float rtf1 = e.realtimeFactor.load();
+    e.setArtificialDelayForTesting(60);     // ~0.4x real time: can keep up again
+    run(100);                               // 1 s to recover
+    const uint64_t under2 = e.underrunSamples.load();
+    run(300);                               // 3 s: must be clean
+    const uint64_t under3 = e.underrunSamples.load();
+    MESSAGE("overload: RTF " << rtf1 << ", fallback samples " << under1 - under0 << ", skipped stale input "
+                             << skipped1 << "; after recovery: " << under3 - under2 << " fallback samples in 3 s; max process() "
+                             << maxCallMs << " ms");
+    CHECK(maxCallMs < 3.0);         // the audio thread never waits for inference
+    CHECK(rtf1 > 1.0);              // the overload is visible to the UI
+    CHECK(under1 > under0);         // and handled by falling back to the dry voice
+    CHECK(skipped1 > 0);            // stale input was skipped, not queued
+    CHECK(under3 == under2);        // back to full AI output within 1 s
+    const size_t n = 48000, start = out.size() - n;
+    CHECK(toneAmplitude(out, start, n, 5000.0, 48000.0) < 0.01); // model output again (its low-pass)
+    CHECK(allFinite(out));
+    e.clearModel();
+}

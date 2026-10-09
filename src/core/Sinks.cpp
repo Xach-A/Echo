@@ -46,12 +46,21 @@ void DeviceRenderSink::prepare(double engineRate, int maxBlock, double blockSeco
 
     const double period = ep_ ? std::max(1, ep_->periodFrames()) : 480;
     const double blockDev = maxBlock / ratio;
-    targetFill_ = period + blockDev + devRate * 0.002;
+    baseTarget_ = period + blockDev + devRate * 0.002;
     masterTarget_ = period + devRate * 0.001;
-    overflowFill_ = targetFill_ + std::max(4.0 * blockDev, devRate * 0.12);
+    overflowExtra_ = std::max(4.0 * blockDev, devRate * 0.12);
+    margin_.prepare(period, 2.0 * period, 1800.0 / std::max(1e-3, blockSeconds)); // see DeviceCaptureSource
+    applyTarget();
     dc_.prepare(ratio, targetFill_, devRate, blockSeconds);
     primed_ = false;
     if (master_ && ep_) ep_->setWakeTarget(nullptr, 0); // re-armed by setMaster()
+}
+
+void DeviceRenderSink::applyTarget() {
+    targetFill_ = baseTarget_ + margin_.extra();
+    overflowFill_ = targetFill_ + overflowExtra_;
+    const double devRate = ep_ ? ep_->sampleRate() : engineRate_;
+    marginMs.store(static_cast<float>(margin_.extra() / devRate * 1000.0), std::memory_order_relaxed);
 }
 
 bool DeviceRenderSink::clockUsable() const {
@@ -67,7 +76,9 @@ bool DeviceRenderSink::clockNeedsData() const {
 double DeviceRenderSink::latencySeconds() const {
     if (!ep_) return 0.0;
     const double devRate = ep_->sampleRate();
-    const double fill = master_ ? masterTarget_ : targetFill_;
+    FlowStamp st;
+    const double fill = master_ ? masterTarget_
+                                : targetFill_ + (ep_->flowStamp(st) ? 0.5 * std::max(1, ep_->periodFrames()) : 0.0);
     return ep_->deviceLatencySeconds() + fill / devRate + rs_.latencyInputFrames() / engineRate_;
 }
 
@@ -90,17 +101,33 @@ void DeviceRenderSink::push(int frames) {
         // The master device fills its own buffer (about two periods) when it
         // starts; pre-roll that much silence so the start-up does not pull a
         // burst of extra blocks from the input devices.
-        const double want = master_ ? 2.0 * (ep_ ? ep_->periodFrames() : 480)
-                                    : targetFill_ - frames * (devRate / engineRate_);
-        if (want > fill) ring.writeZeros(static_cast<size_t>(want - fill) * devCh_);
+        double want = master_ ? 2.0 * (ep_ ? ep_->periodFrames() : 480)
+                              : targetFill_ - frames * (devRate / engineRate_);
+        FlowStamp st;
+        if (!master_ && ep_->flowStamp(st) && writtenTotal_ >= st.total) {
+            // Start on the drift controller's aim (see push() below) so it
+            // does not spend the first seconds correcting.
+            const double since = std::max(0.0, ep_->flowClockNow() - st.time) * devRate;
+            want += std::max(1, ep_->periodFrames()) - std::max(0.0, static_cast<double>(st.last) - since);
+        }
+        if (want > fill) {
+            ring.writeZeros(static_cast<size_t>(want - fill) * devCh_);
+            writtenTotal_ += static_cast<uint64_t>(want - fill);
+        }
         primed_ = true;
         fill = static_cast<double>(ring.size() / static_cast<size_t>(devCh_));
     } else if (!master_ && fill < targetFill_ * 0.25) {
-        // The device ran (nearly) dry: rebuild the cushion in one step.
+        // The device ran (nearly) dry: widen the margin and rebuild the
+        // cushion in one step.
+        margin_.onDropout();
+        applyTarget();
         ring.writeZeros(static_cast<size_t>(targetFill_ * 0.5) * devCh_);
+        writtenTotal_ += static_cast<uint64_t>(targetFill_ * 0.5);
         underruns.fetch_add(1, std::memory_order_relaxed);
         dc_.reset();
         fill = static_cast<double>(ring.size() / static_cast<size_t>(devCh_));
+    } else if (!master_ && margin_.onCleanBlock()) {
+        applyTarget();
     }
     fillMs.store(static_cast<float>(fill / devRate * 1000.0), std::memory_order_relaxed);
 
@@ -112,7 +139,22 @@ void DeviceRenderSink::push(int frames) {
         return;
     }
 
-    const double ratio = master_ ? rs_.nominalRatio() : dc_.update(fill);
+    double ratio = rs_.nominalRatio();
+    if (!master_) {
+        // Same idea as for capture: estimate the continuous level from the
+        // device thread's newest read (the ring empties in device periods).
+        double ctrlFill = fill;
+        double ctrlTarget = targetFill_;
+        FlowStamp st;
+        if (ep_->flowStamp(st) && writtenTotal_ >= st.total) {
+            const double since = std::max(0.0, ep_->flowClockNow() - st.time) * devRate;
+            ctrlFill = static_cast<double>(writtenTotal_ - st.total) +
+                       std::max(0.0, static_cast<double>(st.last) - since);
+            ctrlTarget = targetFill_ + std::max(1, ep_->periodFrames()); // see DeviceCaptureSource::pull
+        }
+        dc_.setTargetFill(ctrlTarget);
+        ratio = dc_.update(ctrlFill);
+    }
     driftPpm.store(master_ ? 0.0f : static_cast<float>(dc_.correctionPpm()), std::memory_order_relaxed);
 
     float* st = stereo_.data();
@@ -141,7 +183,9 @@ void DeviceRenderSink::push(int frames) {
         }
     }
     const size_t want = static_cast<size_t>(n) * devCh_;
-    if (ring.write(d, want) < want) overruns.fetch_add(1, std::memory_order_relaxed);
+    const size_t wrote = ring.write(d, want);
+    writtenTotal_ += wrote / static_cast<size_t>(devCh_);
+    if (wrote < want) overruns.fetch_add(1, std::memory_order_relaxed);
 }
 
 // --------------------------------------------------------------------------

@@ -18,6 +18,7 @@ endif()
 
 option(ECHO_BUILD_TESTS "Build automated tests" ON)
 option(ECHO_BUILD_TOOLS "Build hardware probe tools" ON)
+option(ECHO_SANITIZE "Instrument with AddressSanitizer + UndefinedBehaviorSanitizer (clang; for test runs)" OFF)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
@@ -39,8 +40,15 @@ else()
     if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
         target_compile_options(echo_options INTERFACE -O2)
     endif()
-    # Static C++ runtime: the executables have no dependency on libc++.dll.
-    target_link_options(echo_options INTERFACE -static)
+    if(ECHO_SANITIZE)
+        # Sanitizers need the dynamic runtime (no -static).
+        target_compile_options(echo_options INTERFACE -fsanitize=address,undefined -fno-sanitize-recover=undefined
+            -fno-omit-frame-pointer -g)
+        target_link_options(echo_options INTERFACE -fsanitize=address,undefined)
+    else()
+        # Static C++ runtime: the executables have no dependency on libc++.dll.
+        target_link_options(echo_options INTERFACE -static)
+    endif()
     target_compile_options(echo_options INTERFACE -msse4.1)
 endif()
 
@@ -129,6 +137,12 @@ if(ECHO_BUILD_TESTS)
 endif()
 
 if(ECHO_BUILD_TOOLS)
+    add_executable(echo_bench tools/bench.cpp)
+    target_link_libraries(echo_bench PRIVATE echo_core avrt)
+    if(NOT MSVC)
+        target_link_options(echo_bench PRIVATE -municode)
+    endif()
+
     add_executable(echo_hwtest tools/hwtest.cpp)
     target_link_libraries(echo_hwtest PRIVATE echo_audio)
     if(NOT MSVC)

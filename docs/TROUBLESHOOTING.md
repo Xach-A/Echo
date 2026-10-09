@@ -29,6 +29,12 @@ anywhere automatically).
 
 ## Crackles, dropouts, robotic glitches
 
+Echo adds a little buffering to a device after it drops out (shown as the
+device's extra margin in Diagnostics) and removes it again after 30 minutes
+without problems, so an occasional single click at the start is expected on
+some USB/virtual devices; repeated clicks are not.
+
+
 * Raise the buffer size (Settings > Audio engine > 1024) and press Apply.
 * Turn off "Low-latency shared mode" and exclusive mode.
 * High DSP load: remove heavy effects (High-quality pitch shifting, AI voice),

@@ -75,11 +75,15 @@ void write(Level level, const char* fmt, ...) {
     const double t =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - s.start).count();
 
-    std::time_t now = std::time(nullptr);
+    const auto wall = std::chrono::system_clock::now();
+    std::time_t now = std::chrono::system_clock::to_time_t(wall);
     std::tm tmv{};
     localtime_s(&tmv, &now);
-    char stamp[32];
-    std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &tmv);
+    char stamp[40];
+    const size_t len = std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &tmv);
+    const int ms = static_cast<int>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(wall.time_since_epoch()).count() % 1000);
+    std::snprintf(stamp + len, sizeof(stamp) - len, ".%03d", ms);
 
     std::lock_guard<std::mutex> lock(s.mutex);
     if (s.file) {

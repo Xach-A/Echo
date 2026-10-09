@@ -706,3 +706,81 @@ TEST_CASE("virtual cables: a cable installed later is picked up by an unassigned
     CHECK(mc.session().strip(vs)->rt->sends[mc.session().buses[1].slot].blocked.load());
     mc.stop();
 }
+
+TEST_CASE("devices: opening is asynchronous; ready, failed and hung devices are handled without waiting") {
+    World w;
+    w.backend.asyncOpen = true;
+    w.mc->createDefaultSession();
+    w.mc->start(false);
+    StripModel& mic = w.mc->session().strips[0];
+    // Nothing has opened yet: the controller returned immediately.
+    REQUIRE(w.backend.captures.count("mic"));
+    CHECK_FALSE(mic.online);
+    CHECK(mic.status == "Starting...");
+    w.step(5); // the engine keeps running meanwhile
+    // The devices become ready: they join the graph on the next update.
+    w.backend.captures["mic"]->status_ = EndpointStatus::Running;
+    for (auto& [id, r] : w.backend.renders) r->status_ = EndpointStatus::Running;
+    w.mc->update(1.0);
+    CHECK(w.mc->session().strips[0].online);
+    w.step(60);
+    CHECK(renderAmp(*w.backend.renders["cable_in"], 440.0) == doctest::Approx(0.5).epsilon(0.03));
+
+    // A device that fails while opening reports Windows' reason.
+    SourceRef cable;
+    cable.kind = SourceKind::CaptureDevice;
+    cable.deviceId = "cable_out";
+    const uint32_t vs = w.mc->addStrip(StripGroup::Virtual, cable, "Virtual speaker");
+    auto failing = w.backend.captures["cable_out"];
+    REQUIRE(failing);
+    failing->error_ = "Device is in use by another application";
+    failing->status_ = EndpointStatus::Error;
+    w.mc->update(2.0);
+    CHECK_FALSE(w.mc->session().strip(vs)->online);
+    CHECK(w.mc->session().strip(vs)->status == "Device is in use by another application");
+    // ...and is retried later.
+    const int opens = w.backend.openCaptureCalls;
+    w.mc->update(6.0);
+    CHECK(w.backend.openCaptureCalls > opens);
+
+    // A device that never finishes opening times out instead of hanging.
+    w.mc->setOpenTimeoutForTesting(0.05);
+    auto hung = w.backend.captures["cable_out"];
+    REQUIRE(hung->status_ == EndpointStatus::Starting);
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    w.mc->update(6.5);
+    CHECK(w.mc->session().strip(vs)->status == "The device did not respond (timed out)");
+    w.mc->stop();
+}
+
+TEST_CASE("devices: inputs and outputs set to the Windows default follow a default change") {
+    World w;
+    w.backend.addDevice("mic2", "Headset Mic", false, 1, 48000, false);
+    w.backend.addDevice("phones2", "USB Headset", true, 2, 48000, false);
+    w.mc->createDefaultSession(); // microphone and headphones bus use "Windows default"
+    w.mc->start(false);
+    w.step(30);
+    REQUIRE(w.backend.captures.count("mic"));
+    // The user picks the headset as default recording and playback device.
+    for (auto& d : w.backend.devs) {
+        if (d.info.id == "mic") d.info.isDefault = false;
+        if (d.info.id == "mic2") d.info.isDefault = true;
+        if (d.info.id == "phones") d.info.isDefault = false;
+        if (d.info.id == "phones2") d.info.isDefault = true;
+    }
+    w.backend.changed = true;
+    w.mc->update(1.0);
+    REQUIRE(w.backend.captures.count("mic2"));
+    REQUIRE(w.backend.renders.count("phones2"));
+    CHECK(w.mc->session().strips[0].online);
+    // Audio now comes from the new microphone and plays on the new output.
+    w.mc->setSend(w.mc->session().strips[0].id, w.mc->session().buses[0].id, true);
+    for (int i = 0; i < 80; ++i) {
+        w.backend.captures["mic2"]->produceSine(480, 330.0);
+        w.mc->engine().processBlock();
+        for (auto& [id, r] : w.backend.renders) r->consume(480);
+    }
+    CHECK(renderAmp(*w.backend.renders["phones2"], 330.0) > 0.3);
+    CHECK(renderAmp(*w.backend.renders["cable_in"], 330.0) > 0.3);
+    w.mc->stop();
+}

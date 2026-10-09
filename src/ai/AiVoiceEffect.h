@@ -48,6 +48,11 @@ public:
     std::atomic<float> realtimeFactor{0.0f};
     std::atomic<uint64_t> underrunSamples{0};
     std::atomic<uint64_t> chunksProcessed{0};
+    // Input the worker dropped because it had fallen too far behind to be
+    // useful (inference slower than real time): it skips to the newest audio.
+    std::atomic<uint64_t> skippedSamples{0};
+    // Tests only: extra time added to every inference call.
+    void setArtificialDelayForTesting(int ms) { testDelayMs_.store(ms); }
 
 protected:
     void onPrepare() override;
@@ -88,6 +93,8 @@ private:
     std::atomic<uint64_t> syncAck_{0};
     std::atomic<int> wetOffset_{0};   // wet stream offset (engine samples)
     std::atomic<int> minLatency_{0};  // chunk + margin (engine samples)
+    std::atomic<int> latencyPub_{0};  // latency_ published for the worker
+    std::atomic<int> testDelayMs_{0};
     bool lastActive_ = false;         // audio thread only
     int maxDryDelay_ = 0;
 };

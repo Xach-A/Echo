@@ -40,6 +40,7 @@ public:
     std::atomic<uint64_t> overruns{0};
     std::atomic<float> fillMs{0.0f};
     std::atomic<float> driftPpm{0.0f};
+    std::atomic<float> marginMs{0.0f}; // adaptive extra buffering after dropouts
     std::atomic<bool> online{false};
 
 protected:
@@ -79,9 +80,14 @@ private:
     int devCh_ = 2;
     bool master_ = false;
     bool primed_ = false;
-    double targetFill_ = 0.0;   // device frames
+    void applyTarget();
+    double baseTarget_ = 0.0;   // device frames
+    double targetFill_ = 0.0;   // device frames (base + adaptive margin)
     double masterTarget_ = 0.0; // device frames
     double overflowFill_ = 0.0;
+    double overflowExtra_ = 0.0;
+    AdaptiveMargin margin_;
+    uint64_t writtenTotal_ = 0; // frames written into the ring (incl. silence)
 };
 
 // Collects output in memory (tests, latency probes). Preallocated; frames

@@ -99,10 +99,21 @@ void ChainRunner::process(const ChainSnap& chain, float* l, float* r, bool& mono
         const bool wantActive = !fx->bypass.load(std::memory_order_relaxed) &&
                                 !fx->faulted.load(std::memory_order_relaxed);
         const float target = wantActive ? 1.0f : 0.0f;
-        if (fx->rtActiveMix < 0.0f) fx->rtActiveMix = target;
-        if (fx->rtActiveMix <= 0.0f && target <= 0.0f) continue; // fully bypassed
-
-        if (fx->rtActiveMix <= 0.0f && target > 0.0f) fx->resetState(); // fresh start
+        // A new effect fades in like a re-enabled one (no jump into its
+        // start-up latency).
+        if (fx->rtActiveMix < 0.0f) fx->rtActiveMix = 0.0f;
+        if (fx->rtActiveMix <= 0.0f && target <= 0.0f) { // fully bypassed
+            fx->rtWarmup = -1;
+            continue;
+        }
+        if (fx->rtActiveMix <= 0.0f && target > 0.0f && fx->rtWarmup < 0) {
+            // Fresh start. A latent effect outputs silence until its first
+            // frames are through, so keep the dry signal until then and only
+            // crossfade afterwards (otherwise enabling it drops the audio for
+            // its latency, e.g. 20 ms for noise suppression).
+            fx->resetState();
+            fx->rtWarmup = std::max(0, fx->latencySamples());
+        }
 
         if (mono && fx->info().widensStereo) {
             std::memcpy(r, l, sizeof(float) * n);
@@ -127,6 +138,13 @@ void ChainRunner::process(const ChainSnap& chain, float* l, float* r, bool& mono
             if (fx->faultCount.fetch_add(1, std::memory_order_relaxed) + 1 >= 3)
                 fx->faulted.store(true, std::memory_order_relaxed);
             faults.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+
+        if (fx->rtWarmup > 0) {
+            fx->rtWarmup = std::max(0, fx->rtWarmup - n);
+            std::memcpy(l, dryL_, sizeof(float) * n);
+            if (numCh == 2) std::memcpy(r, dryR_, sizeof(float) * n);
             continue;
         }
 

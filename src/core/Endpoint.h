@@ -33,6 +33,49 @@ struct EndpointStats {
     std::atomic<uint64_t> wakeups{0};
 };
 
+// Timing of the device thread's newest ring transfer: total frames moved so
+// far, the size of the newest transfer and when it happened. With it the
+// engine can estimate the buffer level as a smooth line instead of the
+// packet sawtooth, so clock-drift control reacts to real drift only (not to
+// the phase between device packets and engine blocks).
+struct FlowStamp {
+    uint64_t total = 0;
+    uint32_t last = 0;
+    double time = 0.0; // seconds on the endpoint's flow clock
+};
+
+// Single-writer, lock-free publication of a FlowStamp (sequence lock).
+class FlowStampCell {
+public:
+    void publish(uint64_t total, uint32_t last, double time) {
+        const uint32_t s = seq_.load(std::memory_order_relaxed);
+        seq_.store(s + 1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+        total_.store(total, std::memory_order_relaxed);
+        last_.store(last, std::memory_order_relaxed);
+        time_.store(time, std::memory_order_relaxed);
+        seq_.store(s + 2, std::memory_order_release);
+    }
+    bool read(FlowStamp& out) const {
+        for (int tries = 0; tries < 4; ++tries) {
+            const uint32_t s1 = seq_.load(std::memory_order_acquire);
+            if (s1 & 1u) continue;
+            out.total = total_.load(std::memory_order_relaxed);
+            out.last = last_.load(std::memory_order_relaxed);
+            out.time = time_.load(std::memory_order_relaxed);
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (seq_.load(std::memory_order_relaxed) == s1) return s1 != 0;
+        }
+        return false;
+    }
+
+private:
+    std::atomic<uint32_t> seq_{0};
+    std::atomic<uint64_t> total_{0};
+    std::atomic<uint32_t> last_{0};
+    std::atomic<double> time_{0.0};
+};
+
 // Something the engine can be woken through (master clock signalling).
 struct WakeTarget {
     virtual ~WakeTarget() = default;
@@ -54,6 +97,12 @@ public:
     virtual bool isSparse() const = 0;
     virtual double deviceLatencySeconds() const = 0;
     virtual const std::string& describe() const = 0;
+    // Why the stream failed (status Error), if known.
+    virtual std::string lastError() const { return {}; }
+    // Newest packet written into ring() (false if not available) and the
+    // current time on the same clock.
+    virtual bool flowStamp(FlowStamp& /*out*/) const { return false; }
+    virtual double flowClockNow() const { return 0.0; }
     EndpointStats stats;
 };
 
@@ -72,6 +121,12 @@ public:
     // Master clock: after consuming data, if the ring holds fewer than
     // `thresholdFrames` frames, the device thread calls target->wake().
     virtual void setWakeTarget(WakeTarget* target, int thresholdFrames) = 0;
+    // Why the stream failed (status Error), if known.
+    virtual std::string lastError() const { return {}; }
+    // Newest chunk read from ring() by the device thread (false if not
+    // available) and the current time on the same clock.
+    virtual bool flowStamp(FlowStamp& /*out*/) const { return false; }
+    virtual double flowClockNow() const { return 0.0; }
     EndpointStats stats;
 };
 

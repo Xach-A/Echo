@@ -44,6 +44,9 @@ inline bool isFiniteSample(float x) { return std::isfinite(x); }
 // 100x and cause dropouts.
 void enableFlushDenormals();
 
+// Monotonic high-resolution clock in seconds (QueryPerformanceCounter).
+double monotonicSeconds();
+
 // Relaxed atomic float max, used for meter peaks written by the audio thread.
 inline void atomicMax(std::atomic<float>& a, float v) {
     float cur = a.load(std::memory_order_relaxed);

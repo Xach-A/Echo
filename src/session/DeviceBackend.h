@@ -64,6 +64,9 @@ class DeviceBackend {
 public:
     virtual ~DeviceBackend() = default;
 
+    // Opening may complete asynchronously: the endpoint can be returned with
+    // status Starting and become Running (or Error) later. nullptr = failed
+    // immediately (`error` says why).
     virtual std::shared_ptr<CaptureEndpoint> openCapture(const CaptureRequest& req, std::string* error) = 0;
     virtual std::shared_ptr<RenderEndpoint> openRender(const RenderRequest& req, std::string* error) = 0;
 

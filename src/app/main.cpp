@@ -1,5 +1,10 @@
 // Echo - entry point: window, Direct3D 11, Dear ImGui and the main loop.
 #include <windows.h>
+
+#include <algorithm>
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
 #include <dbghelp.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
@@ -342,6 +347,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int showCmd)
     if (!snapshotDir.empty()) app.startSnapshots(snapshotDir);
 
     double last = nowSeconds();
+    // Frame pacing: Present(1) alone would draw at the monitor's refresh rate
+    // (144 Hz+ on many screens). Meters and controls do not need more than
+    // 60 fps in front and 30 fps behind other windows.
+    HANDLE frameTimer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    if (!frameTimer) frameTimer = CreateWaitableTimerW(nullptr, FALSE, nullptr);
+    double nextFrame = last;
+    double fpsWindowStart = last, frameMsSum = 0.0;
+    int fpsFrames = 0;
+    bool fpsLogged = false;
     bool done = false;
     while (!done) {
         MSG msg;
@@ -371,6 +385,21 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int showCmd)
             g_resizeW = g_resizeH = 0;
             createRenderTarget();
         }
+        // Wait for this frame's slot (input is handled on the next pass).
+        {
+            const bool foreground = GetForegroundWindow() == hwnd;
+            const double interval = foreground ? 1.0 / 60.0 : 1.0 / 30.0;
+            const double t = nowSeconds();
+            if (nextFrame > t + interval) nextFrame = t; // clock jump / long stall
+            if (nextFrame > t && frameTimer) {
+                LARGE_INTEGER due;
+                due.QuadPart = -static_cast<LONGLONG>((nextFrame - t) * 1e7);
+                SetWaitableTimer(frameTimer, &due, 0, nullptr, nullptr, FALSE);
+                MsgWaitForMultipleObjects(1, &frameTimer, FALSE, 100, QS_ALLINPUT);
+            }
+            nextFrame = std::max(nextFrame + interval, nowSeconds());
+        }
+        const double frameStart = nowSeconds();
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
@@ -384,9 +413,32 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int showCmd)
         if (const std::wstring shot = app.takeCaptureRequest(); !shot.empty()) {
             if (!saveBackbufferPng(shot)) ECHO_LOG_WARN("Snapshot failed: %s", echo::wideToUtf8(shot).c_str());
         }
+        frameMsSum += (nowSeconds() - frameStart) * 1000.0; // build + draw, before vsync wait
         const HRESULT hr = g_swapChain->Present(1, 0);
         g_occluded = hr == DXGI_STATUS_OCCLUDED;
+        ++fpsFrames;
+        if (!fpsLogged && nowSeconds() - fpsWindowStart >= 10.0) {
+            fpsLogged = true;
+            ECHO_LOG_INFO("UI: %.1f frames/s, %.2f ms per frame to build and draw",
+                          fpsFrames / (nowSeconds() - fpsWindowStart), frameMsSum / std::max(1, fpsFrames));
+        }
+        static bool firstFrame = true;
+        if (firstFrame) {
+            firstFrame = false;
+            // Start-up time: process creation -> first frame on screen.
+            FILETIME created{}, exited{}, kernel{}, user{}, nowFt{};
+            if (GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) {
+                GetSystemTimeAsFileTime(&nowFt);
+                const auto ticks = [](const FILETIME& f) {
+                    return (static_cast<uint64_t>(f.dwHighDateTime) << 32) | f.dwLowDateTime;
+                };
+                ECHO_LOG_INFO("First frame shown %.0f ms after process start",
+                              (ticks(nowFt) - ticks(created)) / 1e4);
+            }
+        }
     }
+
+    if (frameTimer) CloseHandle(frameTimer);
 
     // Persist window placement.
     WINDOWPLACEMENT wp{sizeof(wp)};

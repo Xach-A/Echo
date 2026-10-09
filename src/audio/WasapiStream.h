@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "audio/WinUtil.h"
+#include "core/Common.h"
 #include "core/Endpoint.h"
 
 namespace echo::win {
@@ -35,7 +36,11 @@ struct StreamOptions {
 
 class WasapiCapture final : public CaptureEndpoint {
 public:
+    // Opens and waits until the stream runs (or fails).
     static std::shared_ptr<WasapiCapture> open(const StreamOptions& opt, std::string* error);
+    // Starts opening on the stream's own thread and returns at once: status
+    // is Starting until the device is ready, then Running or Error.
+    static std::shared_ptr<WasapiCapture> openAsync(const StreamOptions& opt);
     ~WasapiCapture() override;
 
     int channels() const override { return format_.channels; }
@@ -49,7 +54,9 @@ public:
 
     const DeviceFormat& format() const { return format_; }
     const StreamOptions& options() const { return opt_; }
-    std::string lastError() const;
+    std::string lastError() const override;
+    bool flowStamp(FlowStamp& out) const override { return flow_.read(out); }
+    double flowClockNow() const override { return monotonicSeconds(); }
     // Milliseconds since the last packet arrived (diagnostics).
     double msSinceLastPacket() const;
     // True when the device has only ever delivered digital silence (often
@@ -75,6 +82,8 @@ private:
     HANDLE stopEvent_ = nullptr;
     HANDLE readyEvent_ = nullptr;
     std::thread thread_;
+    FlowStampCell flow_;
+    uint64_t flowTotal_ = 0; // device thread only
     std::atomic<int> status_{static_cast<int>(EndpointStatus::Starting)};
     std::atomic<int64_t> lastPacketTick_{0};
     std::atomic<bool> sawNonSilence_{false};
@@ -85,6 +94,7 @@ private:
 class WasapiRender final : public RenderEndpoint {
 public:
     static std::shared_ptr<WasapiRender> open(const StreamOptions& opt, std::string* error);
+    static std::shared_ptr<WasapiRender> openAsync(const StreamOptions& opt);
     ~WasapiRender() override;
 
     int channels() const override { return format_.channels; }
@@ -98,7 +108,9 @@ public:
 
     const DeviceFormat& format() const { return format_; }
     const StreamOptions& options() const { return opt_; }
-    std::string lastError() const;
+    std::string lastError() const override;
+    bool flowStamp(FlowStamp& out) const override { return flow_.read(out); }
+    double flowClockNow() const override { return monotonicSeconds(); }
 
 private:
     explicit WasapiRender(const StreamOptions& opt);
@@ -120,6 +132,8 @@ private:
     HANDLE stopEvent_ = nullptr;
     HANDLE readyEvent_ = nullptr;
     std::thread thread_;
+    FlowStampCell flow_;
+    uint64_t flowTotal_ = 0; // device thread only
     std::atomic<int> status_{static_cast<int>(EndpointStatus::Starting)};
     std::atomic<WakeTarget*> wake_{nullptr};
     std::atomic<int> wakeThreshold_{0};

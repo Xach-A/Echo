@@ -95,6 +95,8 @@ public:
     void migrateSession();
 
     // ---- devices ----
+    // How long a device may take to open before it counts as failed (tests).
+    void setOpenTimeoutForTesting(double seconds) { openTimeout_ = seconds; }
     // Re-reads the device list (Rescan button), then applies device changes.
     void rescanDevices();
     // Virtual-cable drivers are installed separately by the user. When one
@@ -153,6 +155,8 @@ private:
         std::string error;
         double nextRetry = 0.0;
         bool used = false;
+        bool pending = false;     // endpoint still opening
+        double openedAt = 0.0;    // steady-clock seconds
     };
     struct SinkEntry {
         OutputRef ref;
@@ -162,9 +166,26 @@ private:
         std::string error;
         double nextRetry = 0.0;
         bool used = false;
+        bool pending = false;
+        double openedAt = 0.0;
     };
 
     SourceEntry* ensureSource(SourceRef& ref);
+    void adoptCapture(SourceEntry& e);
+    void adoptRender(SinkEntry& e);
+    // Adopts streams that finished opening (or records why they failed).
+    // Returns true when the graph needs rebuilding.
+    bool finishPendingOpens();
+    // Inputs/outputs set to "Windows default" move to the new default device
+    // when the user changes it in Windows. Returns true if any moved.
+    bool followDefaultDevices();
+    // Streams dropped while still opening: kept until their thread is done
+    // so that destroying them never waits on a slow driver.
+    void retireEndpoint(std::shared_ptr<CaptureEndpoint> ep);
+    void retireEndpoint(std::shared_ptr<RenderEndpoint> ep);
+    double openTimeout_ = 10.0;
+    std::vector<std::shared_ptr<CaptureEndpoint>> retiredCaptures_;
+    std::vector<std::shared_ptr<RenderEndpoint>> retiredRenders_;
     SinkEntry* ensureSink(const OutputRef& ref);
     void analyzeFeedback();
     void prepareStrip(StripModel& s);
