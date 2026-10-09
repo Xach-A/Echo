@@ -395,7 +395,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int showCmd)
                 LARGE_INTEGER due;
                 due.QuadPart = -static_cast<LONGLONG>((nextFrame - t) * 1e7);
                 SetWaitableTimer(frameTimer, &due, 0, nullptr, nullptr, FALSE);
-                MsgWaitForMultipleObjects(1, &frameTimer, FALSE, 100, QS_ALLINPUT);
+                const DWORD w = MsgWaitForMultipleObjects(1, &frameTimer, FALSE, 100, QS_ALLINPUT);
+                // Woken by input before this frame's slot: handle the message
+                // (back to the pump) and keep waiting, instead of drawing early.
+                if (w == WAIT_OBJECT_0 + 1 && nowSeconds() < nextFrame - 0.0005) continue;
             }
             nextFrame = std::max(nextFrame + interval, nowSeconds());
         }

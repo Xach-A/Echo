@@ -31,7 +31,12 @@ std::string SourceRef::key() const {
     switch (kind) {
     case SourceKind::CaptureDevice:
     case SourceKind::RenderLoopback: k += (deviceId.empty() ? "<default>" : deviceId) + (exclusive ? "|x" : ""); break;
-    case SourceKind::ProcessLoopback: k += processName + "|" + std::to_string(processId); break;
+    case SourceKind::ProcessLoopback:
+        // By program name: the process ID is filled in once the capture opens
+        // (and changes when the app restarts); keying on it reopened the
+        // capture right after start-up, which caused an audible gap.
+        k += processName.empty() ? "pid:" + std::to_string(processId) : processName;
+        break;
     default: break;
     }
     return k;

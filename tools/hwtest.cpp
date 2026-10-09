@@ -25,6 +25,7 @@
 #include <audiopolicy.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <filesystem>
@@ -534,6 +535,115 @@ void cmdVirtualMic(DeviceManager& dm) {
     measureChirpLatency("Echo output -> virtual mic recording side", *tone, *mem, 48000.0);
 }
 
+// App capture under load, like capturing Chrome while a game runs: this
+// process plays a tone into the virtual cable (inaudible), captures its own
+// audio with process loopback (as for any app), with the default output as
+// the silent engine clock. Optional busy threads imitate a game's CPU load.
+// Reports gaps in the captured tone and every glitch counter.
+void cmdAppSoak(DeviceManager& dm, int seconds, int loadThreads) {
+    const auto pairs = findCablePairs(dm.devices());
+    const CablePair* pair = nullptr;
+    for (const auto& p : pairs)
+        if (!p.secondary) {
+            pair = &p;
+            break;
+        }
+    const std::string outId = dm.defaultDeviceId(Flow::Render);
+    if (!pair || outId.empty() || !processLoopbackSupported()) {
+        result("app capture under load", 0, "needs a virtual cable, a default output and Windows 10 2004+");
+        return;
+    }
+    std::string err;
+    StreamOptions co;
+    co.deviceId = fromUtf8(pair->renderId);
+    co.label = pair->renderName;
+    auto cable = WasapiRender::open(co, &err);
+    StreamOptions oo;
+    oo.deviceId = fromUtf8(outId);
+    oo.label = "default output (clock, silent)";
+    auto phones = WasapiRender::open(oo, &err);
+    StreamOptions po;
+    po.captureMode = CaptureMode::ProcessLoopback;
+    po.processId = GetCurrentProcessId();
+    po.includeProcessTree = true;
+    po.label = "own process (app capture)";
+    auto app = WasapiCapture::open(po, &err);
+    if (!cable || !phones || !app) {
+        result("app capture under load", -1, "could not open streams: " + err);
+        return;
+    }
+    std::atomic<bool> stopLoad{false};
+    std::vector<std::thread> burners;
+    for (int i = 0; i < loadThreads; ++i)
+        burners.emplace_back([&] {
+            volatile double x = 1.0;
+            while (!stopLoad.load(std::memory_order_relaxed)) x = x * 1.0000001 + 1e-9;
+        });
+    EngineRig rig(48000, 480);
+    auto tone = std::make_shared<ToneSource>();
+    tone->wave = ToneSource::Sine;
+    tone->frequency = 1000.0f;
+    tone->levelDb = -20.0f;
+    const int sTone = rig.addSource(tone);
+    auto appSrc = std::make_shared<DeviceCaptureSource>(app);
+    const int sApp = rig.addSource(appSrc);
+    StripRuntime* toneStrip = rig.addStrip(sTone);
+    StripRuntime* appStrip = rig.addStrip(sApp);
+    auto clockSink = std::make_shared<DeviceRenderSink>(phones);
+    const int kClock = rig.addSink(clockSink);
+    clockSink->setMaster(true, rig.engine.wakeTarget());
+    rig.g->masterSink = kClock;
+    auto cableSink = std::make_shared<DeviceRenderSink>(cable);
+    const int kCable = rig.addSink(cableSink);
+    auto mem = std::make_shared<MemorySink>(size_t(48000) * (seconds + 2));
+    const int kMem = rig.addSink(mem);
+    rig.addBus(kCable);
+    rig.addBus(kMem);
+    toneStrip->sends[0].enabled = true; // tone -> cable (this process's audio)
+    appStrip->sends[1].enabled = true;  // captured app audio -> memory
+    rig.go();
+    std::printf("App capture for %d s with %d busy threads (tone into '%s', inaudible)...\n", seconds, loadThreads,
+                pair->renderName.c_str());
+    std::this_thread::sleep_for(std::chrono::seconds(seconds));
+    rig.engine.stop();
+    stopLoad = true;
+    for (auto& t : burners) t.join();
+    // Silent stretches in the captured tone after it first arrives.
+    const auto& d = mem->leftData();
+    const size_t periods = std::min(d.size(), mem->written()) / 48;
+    int gapCount = 0, gapMs = 0;
+    bool started = false, inGap = false;
+    std::string list;
+    for (size_t k = 0; k < periods; ++k) {
+        double re = 0, im = 0;
+        for (int n = 0; n < 48; ++n) {
+            re += d[k * 48 + n] * std::cos(2 * kPiD * n / 48.0);
+            im -= d[k * 48 + n] * std::sin(2 * kPiD * n / 48.0);
+        }
+        const bool low = 2 * std::sqrt(re * re + im * im) / 48 < 0.05;
+        if (!started) {
+            started = !low;
+            continue;
+        }
+        if (low && !inGap) {
+            ++gapCount;
+            if (list.size() < 100) list += " " + std::to_string(k) + "ms";
+        }
+        gapMs += low;
+        inGap = low;
+    }
+    char buf[600];
+    std::snprintf(buf, sizeof(buf),
+                  "%d s, %d busy threads: %d gaps (%d ms)%s in the captured app audio; app source: underruns %llu, "
+                  "gaps %llu, backlog drops %llu, device overflow %llu, Windows discontinuities %llu, margin +%.0f ms; "
+                  "app capture buffer %d frames",
+                  seconds, loadThreads, gapCount, gapMs, list.c_str(), (unsigned long long)appSrc->underruns.load(),
+                  (unsigned long long)appSrc->gaps.load(), (unsigned long long)appSrc->overruns.load(),
+                  (unsigned long long)app->stats.overruns.load(), (unsigned long long)app->stats.discontinuities.load(),
+                  appSrc->marginMs.load(), app->periodFrames());
+    result("app capture under load", started && gapCount == 0 ? 1 : -1, buf);
+}
+
 // UI-thread work that touches Windows audio: how long one call takes.
 void cmdPerf(DeviceManager& dm) {
     auto time = [](const char* what, int reps, auto fn) {
@@ -1003,6 +1113,7 @@ int wmain(int argc, wchar_t** argv) {
     if (cmd == L"sysaudio" || cmd == L"all") cmdSysAudio(dm);
     if (cmd == L"approute") cmdAppRoute(dm);
     if (cmd == L"perf") cmdPerf(dm);
+    if (cmd == L"appsoak") cmdAppSoak(dm, argc > 2 ? _wtoi(argv[2]) : 60, argc > 3 ? _wtoi(argv[3]) : 0);
     if (cmd == L"cableraw") cmdCableRaw(dm, argc > 2 ? _wtoi(argv[2]) : 15, argc > 3 ? _wtof(argv[3]) : 40.0);
     if (cmd == L"soak") cmdSoak(dm, argc > 2 ? _wtof(argv[2]) : 60.0);
     if (cmd == L"denoise") cmdDenoise(dm, argc > 2 ? _wtof(argv[2]) : 10.0);

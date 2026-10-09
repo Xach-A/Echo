@@ -157,6 +157,7 @@ private:
         bool used = false;
         bool pending = false;     // endpoint still opening
         double openedAt = 0.0;    // steady-clock seconds
+        uint64_t seen[5] = {};    // glitch counters already logged
     };
     struct SinkEntry {
         OutputRef ref;
@@ -168,9 +169,14 @@ private:
         bool used = false;
         bool pending = false;
         double openedAt = 0.0;
+        uint64_t seen[4] = {};
     };
 
     SourceEntry* ensureSource(SourceRef& ref);
+    // Writes every new dropout/gap/discontinuity to the log with the
+    // stream's name, so occasional clicks can be traced to their source.
+    void logGlitches();
+    uint64_t seenEngine_[3] = {};
     void adoptCapture(SourceEntry& e);
     void adoptRender(SinkEntry& e);
     // Adopts streams that finished opening (or records why they failed).

@@ -43,7 +43,8 @@ std::string EchoApp::diagnosticReport() {
           << s.source.processName << "' status=" << s.status << " fx=" << s.chain.size();
         if (const SourceRuntime* r = mc_->sourceFor(s.id))
             o << " fill=" << r->fillMs.load() << "ms drift=" << r->driftPpm.load() << "ppm under=" << r->underruns.load()
-              << " over=" << r->overruns.load() << " margin=+" << r->marginMs.load() << "ms latency="
+              << " over=" << r->overruns.load() << " gaps=" << r->gaps.load() << " margin=+" << r->marginMs.load()
+              << "ms latency="
               << r->latencySeconds() * 1000.0 << "ms";
         o << "\n";
     }
@@ -121,10 +122,18 @@ void EchoApp::drawDiagnostics() {
                     ImGui::TableNextColumn();
                     if (r) ImGui::Text("%+.0f ppm", r->driftPpm.load());
                     ImGui::TableNextColumn();
-                    if (r) ImGui::Text("%llu", static_cast<unsigned long long>(r->underruns.load()));
+                    if (r) {
+                        ImGui::Text("%llu", static_cast<unsigned long long>(r->underruns.load() + r->gaps.load()));
+                        Tip("Times this input ran dry (for app/loopback captures: only while audio was playing).");
+                    }
                     ImGui::TableNextColumn();
-                    if (r) ImGui::Text("%llu / %llu", static_cast<unsigned long long>(r->overruns.load()),
-                                       static_cast<unsigned long long>(ep ? ep->stats.overruns.load() : 0));
+                    if (r) {
+                        ImGui::Text("%llu / %llu", static_cast<unsigned long long>(r->overruns.load()),
+                                    static_cast<unsigned long long>(
+                                        ep ? ep->stats.overruns.load() + ep->stats.discontinuities.load() : 0));
+                        Tip("Echo dropped a backlog / audio lost before Echo received it (device buffer overflow or a "
+                            "gap Windows reported).");
+                    }
                     ImGui::TableNextColumn();
                     if (r) ImGui::Text("%.1f ms", r->latencySeconds() * 1000.0);
                 }
