@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <shellapi.h>
+#include <dwmapi.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -83,12 +84,21 @@ bool EchoApp::init(HWND hwnd, ID3D11Device* device, bool safeMode, std::string* 
         mc_->start();
     }
     lastSavedJson_ = sessionToJson(mc_->session()).dump();
+    // Push to talk: the hotkey thread opens and closes the engine's
+    // microphone gate directly, so it responds within a few milliseconds.
+    hotkeys_ = std::make_unique<win::HotkeyService>();
+    hotkeys_->setSettings(mc_->session().hotkeys);
+    appliedHotkeys_ = mc_->session().hotkeys;
+    hotkeysApplied_ = true;
+    Engine* engine = &mc_->engine();
+    hotkeys_->start([engine](bool open) { engine->setMicGate(open); });
     if (!mc_->session().firstRunCompleted) openWizard();
     setTooltipsEnabled(mc_->session().ui.showTooltips);
     return true;
 }
 
 void EchoApp::shutdown() {
+    if (hotkeys_) hotkeys_->stop();
     saveNow();
     if (mc_) mc_->stop();
     textures_.clear();
@@ -116,7 +126,36 @@ void EchoApp::autosave(double now) {
 
 void EchoApp::setDpiScale(float s) {
     dpi_ = s;
-    applyTheme(mc_ ? mc_->session().ui.theme : 0, dpi_, mc_ ? mc_->session().ui.uiScale : 1.0f);
+    applyTheme(mc_ ? mc_->session().ui.theme : 0, dpi_, mc_ ? mc_->session().ui.uiScale : 1.0f,
+               mc_ ? mc_->session().ui.accent : std::string("blue"));
+    if (hwnd_) {
+        BOOL dark = themeIsDark() ? TRUE : FALSE;
+        DwmSetWindowAttribute(hwnd_, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
+    }
+}
+
+void EchoApp::onSystemThemeChanged() {
+    if (mc_ && mc_->session().ui.theme == 3) setDpiScale(dpi_);
+}
+
+void EchoApp::toggleMicrophoneMute() {
+    if (!mc_) return;
+    const bool mute = !mc_->microphonesMuted();
+    mc_->setMicrophonesMuted(mute);
+    ECHO_LOG_INFO("Microphones %s", mute ? "muted" : "unmuted");
+}
+
+void EchoApp::pollHotkeys() {
+    if (!hotkeys_) return;
+    // Settings edited in the UI, loaded from a file or reset.
+    const HotkeySettings& h = mc_->session().hotkeys;
+    if (!hotkeysApplied_ || h.talkMode != appliedHotkeys_.talkMode || h.talkKey != appliedHotkeys_.talkKey ||
+        h.muteKey != appliedHotkeys_.muteKey || h.releaseDelayMs != appliedHotkeys_.releaseDelayMs) {
+        hotkeys_->setSettings(h);
+        appliedHotkeys_ = h;
+        hotkeysApplied_ = true;
+    }
+    for (int n = hotkeys_->takeMuteToggles(); n > 0; --n) toggleMicrophoneMute();
 }
 
 void EchoApp::toast(const std::string& text, int level) {
@@ -320,6 +359,7 @@ bool EchoApp::outputPicker(const char* popupId, OutputRef& out, bool virtualOnly
 void EchoApp::frame(double now, double dt) {
     now_ = now;
     mc_->update(now);
+    pollHotkeys();
     updateMeters(now, dt);
     if (now - lastAppRefresh_ > 1.0) {
         backend_->sessions().refresh();
@@ -414,6 +454,7 @@ void EchoApp::snapshotStep() {
         {"recorder", -1, "Recorder", nullptr},
         {"diagnostics", -1, "Diagnostics", nullptr},
         {"settings", -1, "Settings", nullptr},
+        {"settings-hotkeys", -1, "Settings", nullptr},
     };
     constexpr int kCount = static_cast<int>(std::size(steps));
     if (snapshotIndex_ >= kCount) {
@@ -445,6 +486,14 @@ void EchoApp::snapshotStep() {
             }
             voiceTabRequest_ = "Noise & echo";
         }
+        if (std::strcmp(st.file, "settings-hotkeys") == 0) {
+            // Example bindings (snapshot mode runs on a throwaway profile).
+            HotkeySettings& h = mc_->session().hotkeys;
+            h.talkMode = TalkMode::PushToTalk;
+            h.talkKey = {vk::XButton2, 0};
+            h.muteKey = {'M', KeyModCtrl | KeyModShift};
+            settingsTabRequest_ = "Hotkeys";
+        }
     }
     if (++snapshotFrame_ == 45) {
         captureRequest_ = snapshotDir_ + L"\\" + std::wstring(st.file, st.file + std::strlen(st.file)) + L".png";
@@ -456,6 +505,7 @@ void EchoApp::snapshotStep() {
 void EchoApp::idle(double now) {
     now_ = now;
     mc_->update(now);
+    pollHotkeys();
     for (const auto& n : mc_->takeNotices()) toast(n, 1);
     autosave(now);
 }
@@ -652,6 +702,7 @@ void EchoApp::drawStatusBar() {
     ImGui::SameLine(0, 20);
     ImGui::TextColored(toVec4(under + over ? pal().warn : pal().textDim), "Dropouts: %llu", static_cast<unsigned long long>(under + over));
     Tip("Buffer underruns + overruns across all devices since the engine started. See Diagnostics for details.");
+    drawHotkeyStatus();
     if (!mc_->feedbackWarnings().empty()) {
         ImGui::SameLine(0, 20);
         ImGui::TextColored(toVec4(pal().warn), ICON_WARNING " Feedback loop blocked");

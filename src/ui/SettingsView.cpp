@@ -109,10 +109,19 @@ void EchoApp::drawSettings() {
         }
         if (ImGui::BeginTabItem("Appearance")) {
             int theme = s.ui.theme;
-            const char* themes[] = {"Dark", "Midnight", "Light"};
+            const char* themes[] = {"Dark", "Midnight", "Light", "Match Windows"};
             ImGui::SetNextItemWidth(180 * dpi_);
-            if (ImGui::Combo("Theme", &theme, themes, 3)) {
+            if (ImGui::Combo("Theme", &theme, themes, 4)) {
                 s.ui.theme = theme;
+                setDpiScale(dpi_);
+            }
+            Tip("Match Windows follows Settings > Personalization > Colors > app mode (light or dark).");
+            int accent = 0;
+            for (int i = 0; i < 4; ++i)
+                if (s.ui.accent == kAccentNames[i]) accent = i;
+            ImGui::SetNextItemWidth(180 * dpi_);
+            if (ImGui::Combo("Accent colour", &accent, kAccentLabels, 4)) {
+                s.ui.accent = kAccentNames[accent];
                 setDpiScale(dpi_);
             }
             float sc = s.ui.uiScale;
@@ -125,10 +134,19 @@ void EchoApp::drawSettings() {
             ImGui::TextDisabled("Window layout is saved automatically. View > Reset window layout restores the default.");
             ImGui::EndTabItem();
         }
+        const ImGuiTabItemFlags hotkeyFlags = settingsTabRequest_ == "Hotkeys" ? ImGuiTabItemFlags_SetSelected : 0;
+        settingsTabRequest_.clear();
+        if (ImGui::BeginTabItem("Hotkeys", nullptr, hotkeyFlags)) {
+            drawHotkeySettings();
+            ImGui::EndTabItem();
+        }
         if (ImGui::BeginTabItem("Startup & data")) {
             bool startup = startupEnabled();
             if (ImGui::Checkbox("Start Echo when I sign in to Windows (minimized)", &startup)) setStartup(startup);
             Tip("Adds/removes an entry under your user's Run registry key. No administrator rights needed.");
+            ImGui::Checkbox("Keep Echo running in the notification area when I close the window", &s.ui.closeToTray);
+            Tip("Your microphone, voice and hotkeys keep working with the window closed. Right-click the Echo icon "
+                "next to the clock to open Echo, mute your microphone or quit.");
             ImGui::Separator();
             ImGui::TextDisabled("Settings: %s", wideToUtf8(paths::appDataDir()).c_str());
             if (ImGui::Button(ICON_FOLDER " Open settings folder"))

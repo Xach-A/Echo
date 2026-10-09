@@ -468,6 +468,8 @@ void MixerController::rebuildGraph() {
         }
         // ProcessLoopback may have resolved a new PID: remember it.
         if (e && s.source.kind == SourceKind::ProcessLoopback) s.source.processId = e->ref.processId;
+        // Push to talk and the mute hotkey act on microphones only.
+        s.rt->talkGated = isMicrophoneSource(s.source);
         // Reference (e.g. playback loopback for echo cancellation): only
         // opened when an effect on this strip uses it.
         int refIdx = -1;
@@ -904,6 +906,26 @@ bool MixerController::isMicrophoneSource(const SourceRef& src) const {
         if (src.deviceId.empty() ? d.isDefault : d.id == src.deviceId) return !d.isCable;
     }
     return true; // unknown/unplugged device: treat as a microphone
+}
+
+std::vector<StripModel*> MixerController::microphoneStrips() {
+    std::vector<StripModel*> out;
+    for (auto& s : session_.strips)
+        if (isMicrophoneSource(s.source)) out.push_back(&s);
+    return out;
+}
+
+bool MixerController::microphonesMuted() {
+    const auto mics = microphoneStrips();
+    if (mics.empty()) return false;
+    for (const StripModel* s : mics)
+        if (!s->rt->mute.load()) return false;
+    return true;
+}
+
+void MixerController::setMicrophonesMuted(bool muted) {
+    for (StripModel* s : microphoneStrips()) s->rt->mute = muted;
+    markDirty();
 }
 
 bool MixerController::addDefaultNoiseSuppression(StripModel& s) {

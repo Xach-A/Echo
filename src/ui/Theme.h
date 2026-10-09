@@ -1,6 +1,8 @@
 // Visual theme: palette, ImGui style, fonts and DPI scaling.
 #pragma once
 
+#include <string>
+
 #include "imgui.h"
 
 namespace echo::ui {
@@ -13,8 +15,16 @@ struct Palette {
 
 const Palette& pal();
 
-// theme: 0 dark, 1 midnight (darker), 2 light.
-void applyTheme(int theme, float dpiScale, float userScale);
+// theme: 0 dark, 1 midnight (darker), 2 light, 3 match Windows (light or
+// dark from the "app mode" setting). accent: "blue", "coral", "green" or
+// "violet".
+void applyTheme(int theme, float dpiScale, float userScale, const std::string& accent = "blue");
+// Windows' app mode (Settings > Personalization > Colors).
+bool windowsPrefersLight();
+// True when the theme in use is a dark one (for the window title bar).
+bool themeIsDark();
+extern const char* const kAccentNames[4]; // stored names
+extern const char* const kAccentLabels[4];
 
 struct Fonts {
     ImFont* regular = nullptr;

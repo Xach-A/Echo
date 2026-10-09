@@ -113,6 +113,7 @@ void Engine::processBlockImpl(GraphSnapshot* g, int n) {
         try {
             for (int s = 0; s < g->numSources; ++s) g->sources[s]->pull(n);
 
+            const bool talkOpen = micGate_.load(std::memory_order_relaxed);
             bool anySolo = false;
             for (int s = 0; s < g->numStrips; ++s)
                 anySolo |= g->strips[s].rt->solo.load(std::memory_order_relaxed);
@@ -129,7 +130,7 @@ void Engine::processBlockImpl(GraphSnapshot* g, int n) {
                 StripSnap& st = g->strips[s];
                 const SourceRuntime* src = st.source >= 0 ? g->sources[st.source] : nullptr;
                 const SourceRuntime* ref = st.reference >= 0 ? g->sources[st.reference] : nullptr;
-                st.rt->process(src, st.chain, n, anySolo, acc_, ref);
+                st.rt->process(src, st.chain, n, anySolo, acc_, ref, talkOpen);
             }
 
             for (int k = 0; k < g->numSinks; ++k) g->sinks[k]->clear(n);
@@ -158,8 +159,8 @@ void Engine::processBlockImpl(GraphSnapshot* g, int n) {
                     r = acc_.r[g->buses[ts.index].slot];
                 } else if (ts.index < g->numStrips) {
                     StripRuntime* rt = g->strips[ts.index].rt;
-                    l = ts.kind == RecordTap::StripPre ? rt->preL() : rt->outL();
-                    r = ts.kind == RecordTap::StripPre ? rt->preR() : rt->outR();
+                    l = ts.kind == RecordTap::StripPre ? rt->preL() : ts.kind == RecordTap::StripRaw ? rt->rawL() : rt->outL();
+                    r = ts.kind == RecordTap::StripPre ? rt->preR() : ts.kind == RecordTap::StripRaw ? rt->rawR() : rt->outR();
                 }
                 if (!l) continue;
                 float* sc = ts.tap->scratch;

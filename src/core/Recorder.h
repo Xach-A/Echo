@@ -31,6 +31,16 @@ struct RecordingStatus {
     std::string error;
 };
 
+// A recording found in the recordings folder (newest first).
+struct RecordingFile {
+    std::wstring path;
+    std::string name;      // file name, UTF-8
+    int64_t modified = 0;  // seconds since 1970 (local display is the UI's job)
+    double seconds = 0.0;  // 0 if the header could not be read
+    uint64_t bytes = 0;
+};
+std::vector<RecordingFile> listRecordings(const std::wstring& folder, size_t maxCount);
+
 class Recorder {
 public:
     ~Recorder();

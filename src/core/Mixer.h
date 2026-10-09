@@ -56,8 +56,10 @@ public:
     void prepare(double sampleRate, int maxBlock);
 
     // Real-time.
+    // talkOpen: the push-to-talk gate (see Engine::setMicGate); it silences
+    // this strip like mute when the strip is talkGated.
     void process(const SourceRuntime* src, const ChainSnap& chain, int n, bool anySolo,
-                 BusAccumulators& acc, const SourceRuntime* reference = nullptr);
+                 BusAccumulators& acc, const SourceRuntime* reference = nullptr, bool talkOpen = true);
 
     // --- parameters (UI writes) ---
     std::atomic<float> trimDb{0.0f};
@@ -70,6 +72,7 @@ public:
     std::atomic<int> chanFirst{0};          // first source channel
     std::atomic<int> chanCount{2};          // 1 = mono, 2 = stereo pair
     std::atomic<bool> downmix{false};       // sum all source channels to mono
+    std::atomic<bool> talkGated{false};     // follows the push-to-talk gate (microphones)
     SendParams sends[kMaxBuses];
 
     // --- outputs (audio thread writes) ---
@@ -82,12 +85,15 @@ public:
     const float* outR() const { return postR_.data(); }
     const float* preL() const { return preL_.data(); }
     const float* preR() const { return preR_.data(); }
+    // After trim, before effects (muted like the other taps).
+    const float* rawL() const { return rawL_.data(); }
+    const float* rawR() const { return rawR_.data(); }
 
 private:
     double sr_ = 48000.0;
     LinearSmoother trimSm_, faderSm_, panLSm_, panRSm_, muteSm_;
     ChainBypass bypass_;
-    std::vector<float> l_, r_, preL_, preR_, postL_, postR_;
+    std::vector<float> l_, r_, preL_, preR_, postL_, postR_, rawL_, rawR_;
 };
 
 class BusRuntime : NonCopyable {
@@ -118,7 +124,9 @@ private:
 // Recording tap: the engine copies a signal into `ring` (stereo
 // interleaved); a writer thread drains it to disk.
 struct RecordTap : NonCopyable {
-    enum Kind { StripPost = 0, StripPre = 1, Bus = 2 };
+    // StripRaw: the input before its effects (after trim), e.g. an
+    // unprocessed copy of the microphone next to the voice-changed one.
+    enum Kind { StripPost = 0, StripPre = 1, Bus = 2, StripRaw = 3 };
     explicit RecordTap(size_t ringFrames) { ring.allocate(ringFrames * 2); }
     SpscRing<float> ring;
     std::atomic<uint64_t> droppedFrames{0};

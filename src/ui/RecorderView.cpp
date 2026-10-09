@@ -3,6 +3,8 @@
 #include <shellapi.h>
 #include <shlobj.h>
 
+#include <ctime>
+
 #include "core/Text.h"
 #include "imgui.h"
 #include "ui/App.h"
@@ -52,10 +54,11 @@ void EchoApp::drawRecorder() {
 
     ImGui::BeginDisabled(active);
     ImGui::TextDisabled("Record these signals (one WAV file each):");
-    if (ImGui::BeginTable("##rectargets", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH)) {
+    if (ImGui::BeginTable("##rectargets", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH)) {
         ImGui::TableSetupColumn("Signal", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableSetupColumn("Post-fader", ImGuiTableColumnFlags_WidthFixed, 90 * dpi_);
         ImGui::TableSetupColumn("Pre-fader", ImGuiTableColumnFlags_WidthFixed, 90 * dpi_);
+        ImGui::TableSetupColumn("No effects", ImGuiTableColumnFlags_WidthFixed, 90 * dpi_);
         ImGui::TableHeadersRow();
         for (const auto& st : s.strips) {
             ImGui::TableNextRow();
@@ -68,7 +71,12 @@ void EchoApp::drawRecorder() {
             ImGui::TableNextColumn();
             bool& pre = recordSelection_[key(RecordTap::StripPre, st.id)];
             ImGui::Checkbox("##pre", &pre);
-            Tip("Pre-fader: after effects, before the strip's fader, pan and mute.");
+            Tip("Pre-fader: after effects, before the strip's fader and pan (mute still applies).");
+            ImGui::TableNextColumn();
+            bool& raw = recordSelection_[key(RecordTap::StripRaw, st.id)];
+            ImGui::Checkbox("##raw", &raw);
+            Tip("The input before its effects (after input gain), for example your natural voice next to the "
+                "voice-changed one. Mute still applies.");
             ImGui::PopID();
         }
         for (const auto& b : s.buses) {
@@ -79,6 +87,8 @@ void EchoApp::drawRecorder() {
             ImGui::PushID(static_cast<int>(b.id) + 100000);
             bool& on = recordSelection_[key(RecordTap::Bus, b.id)];
             ImGui::Checkbox("##bus", &on);
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("-");
             ImGui::TableNextColumn();
             ImGui::TextDisabled("-");
             ImGui::PopID();
@@ -117,6 +127,7 @@ void EchoApp::drawRecorder() {
             for (const auto& st : s.strips) {
                 if (recordSelection_[key(RecordTap::StripPost, st.id)]) targets.push_back({RecordTap::StripPost, st.id, st.name});
                 if (recordSelection_[key(RecordTap::StripPre, st.id)]) targets.push_back({RecordTap::StripPre, st.id, st.name + " (pre)"});
+                if (recordSelection_[key(RecordTap::StripRaw, st.id)]) targets.push_back({RecordTap::StripRaw, st.id, st.name + " (no effects)"});
             }
             for (const auto& b : s.buses)
                 if (recordSelection_[key(RecordTap::Bus, b.id)]) targets.push_back({RecordTap::Bus, b.id, busLabel(b) + " " + b.name});
@@ -141,6 +152,38 @@ void EchoApp::drawRecorder() {
         if (st.droppedFrames) ImGui::TextColored(toVec4(p.warn), "%llu frames dropped (disk too slow)", static_cast<unsigned long long>(st.droppedFrames));
         if (!st.error.empty()) ImGui::TextColored(toVec4(p.bad), "%s", st.error.c_str());
         for (const auto& f : st.files) ImGui::TextDisabled("%s", wideToUtf8(f).c_str());
+    }
+
+    // Recent recordings in the folder (re-read every few seconds while shown,
+    // and right after a recording stops).
+    ImGui::SeparatorText("Recent recordings");
+    if (active != recentWasActive_ || now_ - recentRefreshed_ > 3.0) {
+        recentWasActive_ = active;
+        recentRefreshed_ = now_;
+        recent_ = listRecordings(utf8ToWide(s.recorder.folder), 12);
+    }
+    if (recent_.empty()) ImGui::TextDisabled("No recordings in this folder yet.");
+    for (size_t i = 0; i < recent_.size(); ++i) {
+        const RecordingFile& r = recent_[i];
+        ImGui::PushID(static_cast<int>(i));
+        if (ImGui::SmallButton(ICON_PLAY " Play")) ShellExecuteW(nullptr, L"open", r.path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        Tip("Opens the file in your default audio player.");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Show in folder")) {
+            const std::wstring args = L"/select,\"" + r.path + L"\"";
+            ShellExecuteW(nullptr, L"open", L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
+        }
+        ImGui::SameLine();
+        std::time_t t = static_cast<std::time_t>(r.modified);
+        std::tm tmv{};
+        localtime_s(&tmv, &t);
+        char when[32];
+        std::strftime(when, sizeof(when), "%Y-%m-%d %H:%M", &tmv);
+        ImGui::Text("%s", r.name.c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s  |  %s  |  %s", when, r.seconds > 0 ? formatDuration(r.seconds).c_str() : "?",
+                            formatBytes(r.bytes).c_str());
+        ImGui::PopID();
     }
     ImGui::End();
 }

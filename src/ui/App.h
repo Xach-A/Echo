@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "audio/AppRouting.h"
+#include "audio/HotkeyService.h"
 #include "audio/VirtualCables.h"
 #include "audio/WasapiBackend.h"
 #include "core/Meter.h"
@@ -86,6 +87,15 @@ public:
     // to the end of the frame.
     void defer(std::function<void()> fn) { deferred_.push_back(std::move(fn)); }
 
+    // Microphone mute (all microphone inputs), used by the mute hotkey and
+    // the tray menu.
+    bool microphonesMuted() { return mc_ && mc_->microphonesMuted(); }
+    void toggleMicrophoneMute();
+    // Closing the window keeps Echo running in the notification area.
+    bool closeToTray() const { return mc_ && mc_->session().ui.closeToTray; }
+    // Windows switched between light and dark app mode.
+    void onSystemThemeChanged();
+
     // Runs the setup wizard (first run or from the Help menu).
     void openWizard() { wizardOpen_ = true; wizardStep_ = 0; }
 
@@ -130,6 +140,9 @@ private:
     void drawRecorder();
     void drawDiagnostics();
     void drawSettings();
+    void drawHotkeySettings();
+    void drawHotkeyStatus(); // status bar
+    void pollHotkeys();
     void drawWizard();
     void drawAbout();
     void drawToasts();
@@ -155,6 +168,7 @@ private:
     std::wstring snapshotDir_, captureRequest_;
     int snapshotIndex_ = -1, snapshotFrame_ = 0;
     std::string voiceTabRequest_; // Voice Lab tab to bring to front once
+    std::string settingsTabRequest_; // Settings tab to bring to front once
     bool managePresets_ = false;
     ChainTarget selected_;
     bool hasSelection_ = false;
@@ -185,9 +199,17 @@ private:
 
     // recorder view state
     std::unordered_map<uint64_t, bool> recordSelection_;
+    std::vector<RecordingFile> recent_;
+    double recentRefreshed_ = -10.0;
+    bool recentWasActive_ = false;
     // diagnostics
     std::vector<float> cpuHistory_;
     int diagStrip_ = 0, diagBus_ = 0;
+    // hotkeys
+    std::unique_ptr<win::HotkeyService> hotkeys_;
+    HotkeySettings appliedHotkeys_;
+    bool hotkeysApplied_ = false;
+    bool openKeyCapture_ = false;
     // engine settings being edited
     EngineSettings pendingEngine_;
     bool pendingEngineInit_ = false;

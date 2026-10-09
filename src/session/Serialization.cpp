@@ -206,7 +206,13 @@ json sessionToJson(const Session& s) {
                {"maximized", s.ui.maximized},
                {"showTooltips", s.ui.showTooltips},
                {"compactStrips", s.ui.compactStrips},
-               {"accent", s.ui.accent}};
+               {"accent", s.ui.accent},
+               {"closeToTray", s.ui.closeToTray}};
+    auto binding = [](const KeyBinding& b) { return json{{"key", b.key}, {"mods", b.mods}}; };
+    j["hotkeys"] = {{"talkMode", static_cast<int>(s.hotkeys.talkMode)},
+                    {"talkKey", binding(s.hotkeys.talkKey)},
+                    {"muteKey", binding(s.hotkeys.muteKey)},
+                    {"releaseDelayMs", s.hotkeys.releaseDelayMs}};
     return j;
 }
 
@@ -334,6 +340,22 @@ bool sessionFromJson(const json& j, Session& out, std::vector<std::string>* warn
         s.ui.showTooltips = get<bool>(*u, "showTooltips", true);
         s.ui.compactStrips = get<bool>(*u, "compactStrips", false);
         s.ui.accent = get<std::string>(*u, "accent", "blue");
+        s.ui.closeToTray = get<bool>(*u, "closeToTray", false);
+    }
+    if (auto h = j.find("hotkeys"); h != j.end() && h->is_object()) {
+        auto binding = [&](const char* name) {
+            KeyBinding b;
+            if (auto k = h->find(name); k != h->end() && k->is_object()) {
+                b.key = get<int>(*k, "key", 0);
+                b.mods = get<int>(*k, "mods", 0) & (KeyModCtrl | KeyModShift | KeyModAlt | KeyModWin);
+                if (!isBindableKey(b.key)) b = {};
+            }
+            return b;
+        };
+        s.hotkeys.talkMode = static_cast<TalkMode>(clampv(get<int>(*h, "talkMode", 0), 0, 2));
+        s.hotkeys.talkKey = binding("talkKey");
+        s.hotkeys.muteKey = binding("muteKey");
+        s.hotkeys.releaseDelayMs = clampv(get<int>(*h, "releaseDelayMs", 200), 0, 2000);
     }
     out = std::move(s);
     return true;

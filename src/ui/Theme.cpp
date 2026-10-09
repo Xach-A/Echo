@@ -1,5 +1,8 @@
 #include "ui/Theme.h"
 
+#include <windows.h>
+
+#include <cstring>
 #include <filesystem>
 
 namespace echo::ui {
@@ -62,17 +65,46 @@ Palette g_light = [] {
     return p;
 }();
 
-const Palette* g_current = &g_dark;
+Palette g_active = g_dark;
+const Palette* g_current = &g_active;
+bool g_dark_in_use = true;
 Fonts g_fonts;
 
+struct AccentColors {
+    ImU32 dark, darkDim, light, lightDim;
+};
+AccentColors accentColors(const std::string& name) {
+    if (name == "coral") return {IM_COL32(255, 122, 89, 255), IM_COL32(150, 70, 52, 255), IM_COL32(214, 72, 40, 255), IM_COL32(247, 180, 160, 255)};
+    if (name == "green") return {IM_COL32(61, 200, 130, 255), IM_COL32(36, 110, 75, 255), IM_COL32(22, 135, 78, 255), IM_COL32(150, 215, 180, 255)};
+    if (name == "violet") return {IM_COL32(167, 130, 255, 255), IM_COL32(95, 72, 160, 255), IM_COL32(118, 70, 220, 255), IM_COL32(195, 175, 245, 255)};
+    return {IM_COL32(76, 141, 255, 255), IM_COL32(46, 86, 160, 255), IM_COL32(40, 110, 230, 255), IM_COL32(150, 185, 245, 255)};
+}
+
 } // namespace
+
+const char* const kAccentNames[4] = {"blue", "coral", "green", "violet"};
+const char* const kAccentLabels[4] = {"Blue", "Coral", "Green", "Violet"};
 
 const Palette& pal() { return *g_current; }
 Fonts& fonts() { return g_fonts; }
 
-void applyTheme(int theme, float dpiScale, float userScale) {
-    g_current = theme == 1 ? &g_midnight : theme == 2 ? &g_light : &g_dark;
-    const Palette& p = *g_current;
+bool windowsPrefersLight() {
+    DWORD value = 0, size = sizeof(value);
+    const LSTATUS r = RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                                   L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size);
+    return r == ERROR_SUCCESS && value != 0;
+}
+
+bool themeIsDark() { return g_dark_in_use; }
+
+void applyTheme(int theme, float dpiScale, float userScale, const std::string& accent) {
+    if (theme == 3) theme = windowsPrefersLight() ? 2 : 0;
+    g_dark_in_use = theme != 2;
+    g_active = theme == 1 ? g_midnight : theme == 2 ? g_light : g_dark;
+    const AccentColors ac = accentColors(accent);
+    g_active.accent = g_dark_in_use ? ac.dark : ac.light;
+    g_active.accentDim = g_dark_in_use ? ac.darkDim : ac.lightDim;
+    const Palette& p = g_active;
     ImGuiStyle& s = ImGui::GetStyle();
     s = ImGuiStyle();
     s.WindowPadding = ImVec2(10, 10);

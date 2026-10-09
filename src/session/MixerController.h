@@ -90,6 +90,11 @@ public:
     // session().autoNoiseSuppression is on and the chain has none. Does not
     // rebuild the graph. Returns true if it added one.
     bool addDefaultNoiseSuppression(StripModel& s);
+    // Microphone inputs: the ones push to talk and the mute hotkey act on.
+    std::vector<StripModel*> microphoneStrips();
+    // True when there is at least one microphone and every one is muted.
+    bool microphonesMuted();
+    void setMicrophonesMuted(bool muted);
     // One-time upgrades of sessions saved by older versions. Call after
     // loading a session (replaceSession calls it).
     void migrateSession();

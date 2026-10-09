@@ -102,6 +102,11 @@ public:
     // tests while the engine thread is stopped.
     void processBlock();
 
+    // Push-to-talk gate for strips marked talkGated (microphones). Written by
+    // the hotkey thread; read once per block.
+    void setMicGate(bool open) { micGate_.store(open, std::memory_order_relaxed); }
+    bool micGate() const { return micGate_.load(std::memory_order_relaxed); }
+
     WakeTarget* wakeTarget();
     EngineStats& stats() { return stats_; }
     uint64_t epoch() const { return epoch_.load(std::memory_order_acquire); }
@@ -122,6 +127,7 @@ private:
     std::vector<Retired> retired_;
     std::atomic<uint64_t> epoch_{0};
     std::atomic<uint64_t> framesProcessed_{0};
+    std::atomic<bool> micGate_{true};
 
     std::vector<float> busBuf_; // kMaxBuses * 2 * kMaxBlockSize
     BusAccumulators acc_;

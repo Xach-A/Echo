@@ -20,6 +20,8 @@
 //   echo_hwtest denoise [sec]     capture the default microphone through the engine with noise
 //                                 suppression in the strip chain; reports room-noise reduction,
 //                                 voice activity, CPU and latency. Audio stays in memory only.
+//   echo_hwtest hotkeys           push to talk / mute keys through Windows' real key state:
+//                                 presses F24 and F23 with SendInput (keys no app uses)
 //   echo_hwtest all               run everything above (playback is audible, -40 dBFS)
 #include <windows.h>
 #include <audiopolicy.h>
@@ -30,12 +32,14 @@
 #include <cmath>
 #include <filesystem>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "audio/AppRouting.h"
+#include "audio/HotkeyService.h"
 #include "audio/AppSessions.h"
 #include "audio/DeviceManager.h"
 #include "audio/VirtualCables.h"
@@ -1090,6 +1094,88 @@ int exportPresets(const std::wstring& dir) {
     return 0;
 }
 
+// Push to talk through GetAsyncKeyState: synthetic F24/F23 presses (no
+// application uses them) must open/close the gate and toggle mute.
+void cmdHotkeys() {
+    std::printf("\n== Hotkeys (push to talk, mute) ==\n");
+    HotkeyService hk;
+    std::atomic<int> gateChanges{0};
+    std::atomic<bool> gate{true};
+    hk.start([&](bool open) {
+        gate = open;
+        ++gateChanges;
+    });
+    HotkeySettings s;
+    s.talkMode = TalkMode::PushToTalk;
+    s.talkKey = {VK_F24, 0};
+    s.muteKey = {VK_F23, 0};
+    s.releaseDelayMs = 150;
+    hk.setSettings(s);
+    auto key = [](WORD vk, bool down) {
+        INPUT in{};
+        in.type = INPUT_KEYBOARD;
+        in.ki.wVk = vk;
+        in.ki.dwFlags = down ? 0 : KEYEVENTF_KEYUP;
+        return SendInput(1, &in, sizeof(in)) == 1;
+    };
+    // Spins (yielding) instead of Sleep(1), whose ~15.6 ms granularity would
+    // swamp the measurement.
+    auto waitFor = [](const std::function<bool()>& cond, double seconds) {
+        const double t0 = monotonicSeconds();
+        while (monotonicSeconds() - t0 < seconds) {
+            if (cond()) return monotonicSeconds() - t0;
+            std::this_thread::yield();
+        }
+        return -1.0;
+    };
+    const double closed = waitFor([&] { return !gate.load(); }, 0.5);
+    result("push to talk starts closed", closed >= 0 ? 1 : -1, closed >= 0 ? "microphone gate closed" : "gate stayed open");
+    if (!key(VK_F24, true)) {
+        result("push to talk key", 0, "SendInput was blocked (another program has priority), not tested");
+        hk.stop();
+        return;
+    }
+    double opened = waitFor([&] { return gate.load(); }, 0.5);
+    key(VK_F24, false);
+    char buf[160];
+    // A few more presses for a typical figure.
+    double worst = opened;
+    int opens = opened >= 0 ? 1 : 0;
+    for (int i = 0; i < 9 && opened >= 0; ++i) {
+        waitFor([&] { return !gate.load(); }, 1.0);
+        Sleep(7 * (i + 1) % 13); // land at different points of the 5 ms poll
+        key(VK_F24, true);
+        const double t = waitFor([&] { return gate.load(); }, 0.5);
+        key(VK_F24, false);
+        if (t >= 0) ++opens;
+        worst = std::max(worst, t);
+    }
+    std::snprintf(buf, sizeof(buf), "gate opened %.1f ms after the first key press; slowest of %d presses %.1f ms",
+                  opened * 1000.0, opens, worst * 1000.0);
+    result("push to talk opens", opened >= 0 && opens == 10 && worst < 0.05 ? 1 : -1, opened >= 0 ? buf : "gate did not open");
+    const double reclosed = waitFor([&] { return !gate.load(); }, 1.0);
+    std::snprintf(buf, sizeof(buf), "closed %.0f ms after release (release delay 150 ms)", reclosed * 1000.0);
+    result("push to talk release delay", reclosed >= 0.12 && reclosed < 0.25 ? 1 : -1, reclosed >= 0 ? buf : "gate stayed open");
+
+    key(VK_F23, true);
+    Sleep(30);
+    key(VK_F23, false);
+    Sleep(30);
+    key(VK_F23, true);
+    Sleep(30);
+    key(VK_F23, false);
+    Sleep(30);
+    const int toggles = hk.takeMuteToggles();
+    std::snprintf(buf, sizeof(buf), "%d presses counted (expected 2)", toggles);
+    result("mute key presses", toggles == 2 ? 1 : -1, buf);
+
+    s.talkMode = TalkMode::Off;
+    hk.setSettings(s);
+    const double reopened = waitFor([&] { return gate.load(); }, 0.5);
+    result("push to talk off opens the microphone", reopened >= 0 ? 1 : -1, reopened >= 0 ? "gate open" : "gate stayed closed");
+    hk.stop();
+}
+
 int wmain(int argc, wchar_t** argv) {
     SetConsoleOutputCP(CP_UTF8);
     if (argc > 2 && std::wstring(argv[1]) == L"export-presets") return exportPresets(argv[2]);
@@ -1117,6 +1203,7 @@ int wmain(int argc, wchar_t** argv) {
     if (cmd == L"cableraw") cmdCableRaw(dm, argc > 2 ? _wtoi(argv[2]) : 15, argc > 3 ? _wtof(argv[3]) : 40.0);
     if (cmd == L"soak") cmdSoak(dm, argc > 2 ? _wtof(argv[2]) : 60.0);
     if (cmd == L"denoise") cmdDenoise(dm, argc > 2 ? _wtof(argv[2]) : 10.0);
+    if (cmd == L"hotkeys") cmdHotkeys();
     std::printf("\nSummary: %d passed, %d failed, %d skipped\n", g_pass, g_fail, g_skip);
     return g_fail ? 1 : 0;
 }
