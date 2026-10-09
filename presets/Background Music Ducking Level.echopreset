@@ -1,0 +1,25 @@
+{
+  "category": "Music",
+  "chain": [
+    {
+      "bypass": false,
+      "params": {
+        "gain": -12
+      },
+      "type": "gain"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "hp_on": 0,
+        "lp_freq": 9000,
+        "lp_on": 1
+      },
+      "type": "filter"
+    }
+  ],
+  "description": "Quieter, darker music suitable under speech.",
+  "format": "echo.chain-preset",
+  "name": "Background Music Ducking Level",
+  "version": 1
+}

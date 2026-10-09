@@ -1,0 +1,1 @@
+ONNX Runtime v1.30.0 C API headers (MIT). The runtime DLL is not vendored; see docs/AI_VOICE.md.

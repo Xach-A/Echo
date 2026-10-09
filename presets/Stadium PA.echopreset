@@ -1,0 +1,33 @@
+{
+  "category": "Voice changer",
+  "chain": [
+    {
+      "bypass": false,
+      "params": {
+        "intensity": 55,
+        "mode": 4
+      },
+      "type": "character"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "decay": 2.5,
+        "mix": 20,
+        "size": 1.4
+      },
+      "type": "reverb"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "ceiling": -1.0
+      },
+      "type": "limiter"
+    }
+  ],
+  "description": "Public-address system with slap-back echoes.",
+  "format": "echo.chain-preset",
+  "name": "Stadium PA",
+  "version": 1
+}

@@ -1,0 +1,59 @@
+{
+  "category": "Voice processing",
+  "chain": [
+    {
+      "bypass": false,
+      "params": {},
+      "type": "voice_denoise"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "hp_freq": 100,
+        "hp_on": 1
+      },
+      "type": "filter"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "b1_freq": 120,
+        "b1_gain": 3,
+        "b4_freq": 3500,
+        "b4_gain": 3,
+        "b6_gain": 3
+      },
+      "type": "eq"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "attack": 2,
+        "makeup": 10,
+        "ratio": 8,
+        "release": 80,
+        "threshold": -28
+      },
+      "type": "compressor"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "freq": 7000,
+        "threshold": -28
+      },
+      "type": "deesser"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "ceiling": -1.0
+      },
+      "type": "limiter"
+    }
+  ],
+  "description": "Heavily compressed, bright 'FM radio host' voice.",
+  "format": "echo.chain-preset",
+  "name": "Broadcast Radio DJ",
+  "version": 1
+}

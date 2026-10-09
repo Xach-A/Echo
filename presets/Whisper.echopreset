@@ -1,0 +1,31 @@
+{
+  "category": "Voice changer",
+  "chain": [
+    {
+      "bypass": false,
+      "params": {
+        "mode": 1
+      },
+      "type": "robot"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "b5_freq": 5000,
+        "b5_gain": 3
+      },
+      "type": "eq"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "ceiling": -1.0
+      },
+      "type": "limiter"
+    }
+  ],
+  "description": "Turns speech into a breathy whisper.",
+  "format": "echo.chain-preset",
+  "name": "Whisper",
+  "version": 1
+}

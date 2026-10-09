@@ -1,0 +1,25 @@
+{
+  "category": "Voice changer",
+  "chain": [
+    {
+      "bypass": false,
+      "params": {
+        "intensity": 80,
+        "mode": 2,
+        "noise": -52
+      },
+      "type": "character"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "ceiling": -1.0
+      },
+      "type": "limiter"
+    }
+  ],
+  "description": "Clipped, narrow two-way radio voice.",
+  "format": "echo.chain-preset",
+  "name": "Walkie-Talkie",
+  "version": 1
+}

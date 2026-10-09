@@ -1,0 +1,23 @@
+{
+  "category": "Voice changer",
+  "chain": [
+    {
+      "bypass": false,
+      "params": {
+        "sub": -3
+      },
+      "type": "octaver"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "ceiling": -1.0
+      },
+      "type": "limiter"
+    }
+  ],
+  "description": "Blends a voice one octave lower.",
+  "format": "echo.chain-preset",
+  "name": "Octave Down",
+  "version": 1
+}

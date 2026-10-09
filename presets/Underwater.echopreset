@@ -1,0 +1,43 @@
+{
+  "category": "Voice changer",
+  "chain": [
+    {
+      "bypass": false,
+      "params": {
+        "hp_on": 0,
+        "lp_freq": 900,
+        "lp_on": 1,
+        "lp_slope": 2
+      },
+      "type": "filter"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "depth": 6,
+        "mix": 60,
+        "rate": 1.5
+      },
+      "type": "chorus"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "mix": 40,
+        "rate": 0.3
+      },
+      "type": "phaser"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "ceiling": -1.0
+      },
+      "type": "limiter"
+    }
+  ],
+  "description": "Muffled, wobbling voice.",
+  "format": "echo.chain-preset",
+  "name": "Underwater",
+  "version": 1
+}

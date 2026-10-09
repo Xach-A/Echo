@@ -1,0 +1,32 @@
+{
+  "category": "Voice changer",
+  "chain": [
+    {
+      "bypass": false,
+      "params": {
+        "bits": 6,
+        "downsample": 6
+      },
+      "type": "bitcrusher"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "hp_freq": 200,
+        "hp_on": 1
+      },
+      "type": "filter"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "ceiling": -1.0
+      },
+      "type": "limiter"
+    }
+  ],
+  "description": "Crunchy retro game voice.",
+  "format": "echo.chain-preset",
+  "name": "Lo-fi 8-bit",
+  "version": 1
+}
