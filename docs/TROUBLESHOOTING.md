@@ -64,7 +64,7 @@ Diagnostics for Echo dropouts (those would be Echo's, and are counted there).
 ## Noise suppression / echo cancellation
 
 * **Voice sounds thin or words get cut**: lower *Strength* (60–85 %) in
-  Voice Lab > Noise & echo, or turn off the *Voice gate* / lower its
+  Voices > Noise & echo, or turn off the *Voice gate* / lower its
   threshold. Very quiet speech far from the microphone is harder to separate
   from noise — move closer or raise the input gain.
 * **Background voices or TV are not removed**: noise suppression keeps
@@ -89,8 +89,8 @@ there also mutes Echo's capture.
 
 * After an unclean exit Echo offers safe mode. Start menu also has
   "Echo (safe mode)", or run `Echo.exe --safe-mode`.
-* Reset all settings: `Echo.exe --reset-settings` (keeps a backup) or File >
-  Reset to defaults.
+* Reset all settings: `Echo.exe --reset-settings` (keeps a backup) or Settings >
+  Startup & data > Reset to defaults.
 * Logs: `%LOCALAPPDATA%\Echo\logs\echo.log`; crash dumps: `%LOCALAPPDATA%\Echo\crashes`.
 * "Could not initialise Direct3D 11": update the graphics driver; Echo falls
   back to software rendering (WARP) when hardware fails.

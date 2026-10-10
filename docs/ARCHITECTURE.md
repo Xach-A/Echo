@@ -9,7 +9,7 @@ the pieces fit together. It is written for developers extending Echo.
 |---|---|---|---|
 | Language | C++20 | Real-time audio needs predictable latency, no GC, direct OS APIs. | C# (GC pauses on the audio path), Rust (no toolchain on the target machine, smaller Windows audio ecosystem). |
 | Audio API | WASAPI (shared, exclusive, IAudioClient3 low-latency shared, loopback, process loopback) | Native to Windows 10/11, no third-party SDK, supports every capture mode Echo needs. | ASIO (Steinberg's SDK license forbids redistributing the SDK and most consumer devices lack ASIO drivers; ASIO-only hardware can still be used through its WDM/WASAPI driver). PortAudio/RtAudio (an extra abstraction layer that hides the loopback/process-loopback features Echo depends on). |
-| UI | Dear ImGui (docking) on Direct3D 11 | MIT licensed, a few files, renders at monitor rate on its own thread with zero coupling to audio, fully custom widgets (faders, meters, knobs), dockable/re-arrangeable panels. | JUCE (AGPLv3 or commercial since v8; would force AGPL on the whole app), Qt (large LGPL deployment, plugin/DLL management), WebView2 UI (a second runtime and an IPC boundary). |
+| UI | Dear ImGui (docking) on Direct3D 11 | MIT licensed, a few files, renders at monitor rate on its own thread with zero coupling to audio, fully custom widgets (faders, meters, knobs, "Friendly Pop" cards, switches and tiles). | JUCE (AGPLv3 or commercial since v8; would force AGPL on the whole app), Qt (large LGPL deployment, plugin/DLL management), WebView2 UI (a second runtime and an IPC boundary). |
 | Virtual endpoints | Integrate with any installed loopback-cable driver; no Echo kernel driver is shipped | A user-mode app cannot create audio endpoints. A new kernel driver must be EV-signed and attestation-signed by Microsoft to load on Secure Boot systems; shipping an unsigned driver would require users to disable signature enforcement, which Echo must never ask for. | Writing/bundling a SysVAD-derived driver (unsignable here), bundling VB-CABLE (license forbids redistribution). See `VIRTUAL_DEVICES.md`. |
 | Per-app capture | WASAPI process loopback (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`) | Official API (Windows 10 2004+), no driver, captures a process tree. Exclude-mode on Echo's own PID gives "all system audio except Echo", which cannot feed back. | Hooking/injection (fragile, anti-cheat hostile). |
 | Per-app output selection | Undocumented `IAudioPolicyConfigFactory` (same as Windows Volume mixer), clearly marked experimental, user-initiated only | Lets users send an app to a virtual cable from inside Echo. | — (Windows offers no documented API; fallback opens Windows Settings). |
@@ -33,8 +33,9 @@ src/audio     Windows platform layer: device enumeration + hot-plug, WASAPI stre
               WasapiBackend (implements DeviceBackend).
 src/ai        Optional AI voice module: dynamic ONNX Runtime loader, model packages,
               asynchronous AI voice effect.
-src/ui        Dear ImGui application and views (mixer, effects, routing, voice lab,
-              apps, devices, recorder, diagnostics, settings, setup wizard).
+src/ui        Dear ImGui application: header and screens (home, voices, mixer, apps,
+              devices, recorder, settings with diagnostics), effects editor, setup
+              guide; Pop.* holds the shared widgets, Theme.* the light/dark palettes.
 src/app       Win32 window, Direct3D 11, main loop, crash handling, single instance.
 tests         doctest unit/integration tests with generated signals and fake devices.
 tools         echo_hwtest (real-hardware probe), icon and test-model generators,

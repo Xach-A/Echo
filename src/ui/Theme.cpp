@@ -2,191 +2,258 @@
 
 #include <windows.h>
 
-#include <cstring>
 #include <filesystem>
 
 namespace echo::ui {
 
 namespace {
 
-Palette g_dark = {
-    IM_COL32(17, 19, 24, 255),    // bg
-    IM_COL32(24, 27, 34, 255),    // panel
-    IM_COL32(30, 34, 43, 255),    // panelAlt
-    IM_COL32(39, 44, 55, 255),    // frame
-    IM_COL32(50, 57, 71, 255),    // frameHover
-    IM_COL32(52, 58, 72, 255),    // border
-    IM_COL32(228, 232, 240, 255), // text
-    IM_COL32(138, 147, 166, 255), // textDim
-    IM_COL32(76, 141, 255, 255),  // accent
-    IM_COL32(46, 86, 160, 255),   // accentDim
-    IM_COL32(61, 220, 132, 255),  // good
-    IM_COL32(255, 193, 69, 255),  // warn
-    IM_COL32(255, 77, 77, 255),   // bad
-    IM_COL32(10, 11, 14, 255),    // meterBg
-    IM_COL32(255, 169, 77, 255),  // hardware (orange)
-    IM_COL32(124, 227, 139, 255), // apps (green)
-    IM_COL32(185, 140, 255, 255), // virtual (purple)
-    IM_COL32(255, 224, 102, 255), // generators (yellow)
-    IM_COL32(77, 210, 255, 255),  // physical bus (cyan)
-    IM_COL32(200, 140, 255, 255), // virtual bus (violet)
+struct AccentSet {
+    unsigned color, tint, ink;
+};
+struct Accent {
+    const char* name;
+    AccentSet light, dark;
+};
+const Accent kAccents[] = {
+    {"coral", {0xEE5B3B, 0xFDEBE6, 0x8F2F18}, {0xFF7A59, 0x3A2420, 0xFFB4A2}},
+    {"blue", {0x2F6FED, 0xE4ECFC, 0x1F47A8}, {0x5B8DEF, 0x1B2A4A, 0x9DB8FF}},
+    {"green", {0x22A06B, 0xDFF5E8, 0x17663C}, {0x3DC47A, 0x173326, 0x7FE0A8}},
+    {"violet", {0x8B5CF6, 0xEEE7FC, 0x5A35B5}, {0xA78BFA, 0x2A2147, 0xC4AEFF}},
 };
 
-Palette g_midnight = [] {
-    Palette p = g_dark;
-    p.bg = IM_COL32(8, 9, 12, 255);
-    p.panel = IM_COL32(14, 16, 20, 255);
-    p.panelAlt = IM_COL32(19, 21, 27, 255);
-    p.frame = IM_COL32(28, 31, 39, 255);
-    p.frameHover = IM_COL32(40, 45, 57, 255);
-    p.border = IM_COL32(38, 42, 52, 255);
-    return p;
-}();
-
-Palette g_light = [] {
-    Palette p = g_dark;
-    p.bg = IM_COL32(236, 238, 242, 255);
-    p.panel = IM_COL32(248, 249, 251, 255);
-    p.panelAlt = IM_COL32(240, 242, 246, 255);
-    p.frame = IM_COL32(225, 229, 236, 255);
-    p.frameHover = IM_COL32(210, 216, 226, 255);
-    p.border = IM_COL32(200, 206, 216, 255);
-    p.text = IM_COL32(28, 32, 40, 255);
-    p.textDim = IM_COL32(100, 108, 124, 255);
-    p.accent = IM_COL32(40, 110, 230, 255);
-    p.accentDim = IM_COL32(150, 185, 245, 255);
-    p.meterBg = IM_COL32(40, 44, 52, 255);
-    p.groupHardware = IM_COL32(222, 128, 30, 255);
-    p.groupApps = IM_COL32(40, 160, 70, 255);
-    p.groupVirtual = IM_COL32(130, 80, 220, 255);
-    p.groupGen = IM_COL32(190, 150, 0, 255);
-    p.busPhysical = IM_COL32(0, 150, 200, 255);
-    p.busVirtual = IM_COL32(150, 80, 220, 255);
-    return p;
-}();
-
-Palette g_active = g_dark;
-const Palette* g_current = &g_active;
-bool g_dark_in_use = true;
-Fonts g_fonts;
-
-struct AccentColors {
-    ImU32 dark, darkDim, light, lightDim;
-};
-AccentColors accentColors(const std::string& name) {
-    if (name == "coral") return {IM_COL32(255, 122, 89, 255), IM_COL32(150, 70, 52, 255), IM_COL32(214, 72, 40, 255), IM_COL32(247, 180, 160, 255)};
-    if (name == "green") return {IM_COL32(61, 200, 130, 255), IM_COL32(36, 110, 75, 255), IM_COL32(22, 135, 78, 255), IM_COL32(150, 215, 180, 255)};
-    if (name == "violet") return {IM_COL32(167, 130, 255, 255), IM_COL32(95, 72, 160, 255), IM_COL32(118, 70, 220, 255), IM_COL32(195, 175, 245, 255)};
-    return {IM_COL32(76, 141, 255, 255), IM_COL32(46, 86, 160, 255), IM_COL32(40, 110, 230, 255), IM_COL32(150, 185, 245, 255)};
+const Accent& accentByName(const std::string& name) {
+    for (const auto& a : kAccents)
+        if (name == a.name) return a;
+    return kAccents[0];
 }
+
+Palette lightPalette() {
+    Palette p{};
+    p.bg = hex(0xF4F6FA);
+    p.surface = p.panel = hex(0xFFFFFF);
+    p.surfaceAlt = p.panelAlt = hex(0xF7F9FC);
+    p.frame = hex(0xFFFFFF);
+    p.frameHover = hex(0xF1F4F9);
+    p.border = hex(0xC9D1DE);
+    p.text = hex(0x1C2230);
+    p.text2 = hex(0x4A5366);
+    p.textDim = hex(0x6A7387);
+    p.outline = hex(0x283041);
+    p.shadow = hex(0xDCE3EE);
+    p.line = hex(0xE6EBF3);
+    p.lineSoft = hex(0xD3DAE6);
+    p.primary = hex(0x1C2230);
+    p.onPrimary = hex(0xFFFFFF);
+    p.onAccent = hex(0x1C2230);
+    p.track = hex(0xE4E8F0);
+    p.segBg = hex(0xEEF1F6);
+    p.good = hex(0x1F9D57);
+    p.goodTint = hex(0xDFF5E8);
+    p.goodInk = hex(0x17663C);
+    p.warn = hex(0xC98A12);
+    p.warnTint = hex(0xFFF6E5);
+    p.warnInk = hex(0x8A5A00);
+    p.bad = hex(0xD93838);
+    p.badTint = hex(0xFDE8E8);
+    p.badInk = hex(0xA12424);
+    p.infoTint = hex(0xEAF0FB);
+    p.busPhysical = hex(0x2E62D9);
+    p.busATint = hex(0xE4ECFC);
+    p.busAInk = hex(0x1F47A8);
+    p.busVirtual = hex(0x7A4FE0);
+    p.busBTint = hex(0xEEE7FC);
+    p.busBInk = hex(0x5A35B5);
+    p.link = hex(0x2457C5);
+    p.meterBg = hex(0xE6EBF3);
+    p.meterGreen = hex(0x2FAE66);
+    p.meterAmber = hex(0xE9A93B);
+    p.groupHardware = hex(0xE8743B);
+    p.groupApps = hex(0x2FAE66);
+    p.groupVirtual = hex(0x7A4FE0);
+    p.groupGen = hex(0xC99A00);
+    return p;
+}
+
+Palette darkPalette() {
+    Palette p{};
+    p.bg = hex(0x13161C);
+    p.surface = p.panel = hex(0x1C2028);
+    p.surfaceAlt = p.panelAlt = hex(0x222733);
+    p.frame = hex(0x242A35);
+    p.frameHover = hex(0x2C3340);
+    p.border = hex(0x3A4252);
+    p.text = hex(0xECEFF4);
+    p.text2 = hex(0xB4BCCB);
+    p.textDim = hex(0x8A93A6);
+    p.outline = hex(0x4A5366);
+    p.shadow = hex(0x0A0C10);
+    p.line = hex(0x2A303C);
+    p.lineSoft = hex(0x343B48);
+    p.primary = hex(0xECEFF4);
+    p.onPrimary = hex(0x13161C);
+    p.onAccent = hex(0x1C2230);
+    p.track = hex(0x3A4252);
+    p.segBg = hex(0x252B36);
+    p.good = hex(0x3DC47A);
+    p.goodTint = hex(0x173326);
+    p.goodInk = hex(0x7FE0A8);
+    p.warn = hex(0xE9A93B);
+    p.warnTint = hex(0x3A2E14);
+    p.warnInk = hex(0xF2C46B);
+    p.bad = hex(0xFF6B6B);
+    p.badTint = hex(0x3A1A1A);
+    p.badInk = hex(0xFF9C9C);
+    p.infoTint = hex(0x1B2536);
+    p.busPhysical = hex(0x5B8DEF);
+    p.busATint = hex(0x1B2A4A);
+    p.busAInk = hex(0x9DB8FF);
+    p.busVirtual = hex(0xA78BFA);
+    p.busBTint = hex(0x2A2147);
+    p.busBInk = hex(0xC4AEFF);
+    p.link = hex(0x8DB4FF);
+    p.meterBg = hex(0x2A303C);
+    p.meterGreen = hex(0x3DC47A);
+    p.meterAmber = hex(0xE9A93B);
+    p.groupHardware = hex(0xFF9A5C);
+    p.groupApps = hex(0x3DC47A);
+    p.groupVirtual = hex(0xA78BFA);
+    p.groupGen = hex(0xFFD15C);
+    return p;
+}
+
+Palette g_active = lightPalette();
+bool g_dark = false;
+float g_scale = 1.0f;
+Fonts g_fonts;
 
 } // namespace
 
-const char* const kAccentNames[4] = {"blue", "coral", "green", "violet"};
-const char* const kAccentLabels[4] = {"Blue", "Coral", "Green", "Violet"};
+const char* const kAccentNames[4] = {"coral", "blue", "green", "violet"};
+const char* const kAccentLabels[4] = {"Coral", "Blue", "Green", "Violet"};
 
-const Palette& pal() { return *g_current; }
+const Palette& pal() { return g_active; }
 Fonts& fonts() { return g_fonts; }
+float uiScale() { return g_scale; }
 
 bool windowsPrefersLight() {
-    DWORD value = 0, size = sizeof(value);
+    DWORD value = 1, size = sizeof(value);
     const LSTATUS r = RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
                                    L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size);
-    return r == ERROR_SUCCESS && value != 0;
+    return r != ERROR_SUCCESS || value != 0;
 }
 
-bool themeIsDark() { return g_dark_in_use; }
+bool themeIsDark() { return g_dark; }
+
+ImU32 accentColor(const std::string& name) {
+    const Accent& a = accentByName(name);
+    return hex(g_dark ? a.dark.color : a.light.color);
+}
 
 void applyTheme(int theme, float dpiScale, float userScale, const std::string& accent) {
-    if (theme == 3) theme = windowsPrefersLight() ? 2 : 0;
-    g_dark_in_use = theme != 2;
-    g_active = theme == 1 ? g_midnight : theme == 2 ? g_light : g_dark;
-    const AccentColors ac = accentColors(accent);
-    g_active.accent = g_dark_in_use ? ac.dark : ac.light;
-    g_active.accentDim = g_dark_in_use ? ac.darkDim : ac.lightDim;
+    g_dark = theme == 1 || (theme == 2 && !windowsPrefersLight());
+    g_active = g_dark ? darkPalette() : lightPalette();
+    const AccentSet& a = g_dark ? accentByName(accent).dark : accentByName(accent).light;
+    g_active.accent = hex(a.color);
+    g_active.accentTint = g_active.accentDim = hex(a.tint);
+    g_active.accentInk = hex(a.ink);
     const Palette& p = g_active;
+
     ImGuiStyle& s = ImGui::GetStyle();
     s = ImGuiStyle();
-    s.WindowPadding = ImVec2(10, 10);
-    s.FramePadding = ImVec2(8, 5);
-    s.ItemSpacing = ImVec2(8, 6);
-    s.ItemInnerSpacing = ImVec2(6, 4);
-    s.CellPadding = ImVec2(6, 4);
+    s.WindowPadding = ImVec2(16, 16);
+    s.FramePadding = ImVec2(10, 6);
+    s.ItemSpacing = ImVec2(10, 8);
+    s.ItemInnerSpacing = ImVec2(8, 6);
+    s.CellPadding = ImVec2(8, 6);
     s.ScrollbarSize = 12;
-    s.GrabMinSize = 10;
-    s.WindowRounding = 6;
-    s.ChildRounding = 6;
-    s.FrameRounding = 5;
-    s.PopupRounding = 6;
-    s.ScrollbarRounding = 6;
-    s.GrabRounding = 4;
-    s.TabRounding = 5;
-    s.WindowBorderSize = 1;
-    s.FrameBorderSize = 0;
-    s.PopupBorderSize = 1;
+    s.GrabMinSize = 14;
+    s.WindowRounding = 14;
+    s.ChildRounding = 16;
+    s.FrameRounding = 10;
+    s.PopupRounding = 12;
+    s.ScrollbarRounding = 8;
+    s.GrabRounding = 8;
+    s.TabRounding = 10;
+    s.WindowBorderSize = 1.5f;
+    s.ChildBorderSize = 1.5f;
+    s.FrameBorderSize = 1.5f;
+    s.PopupBorderSize = 1.5f;
     s.TabBorderSize = 0;
     s.WindowTitleAlign = ImVec2(0.0f, 0.5f);
-    s.SeparatorTextBorderSize = 1;
-    s.DockingSeparatorSize = 3;
+    s.SeparatorTextBorderSize = 1.5f;
+    s.SeparatorTextPadding = ImVec2(0, 4);
+    s.DockingSeparatorSize = 2;
 
     ImVec4* c = s.Colors;
     auto v = [](ImU32 col) { return ImGui::ColorConvertU32ToFloat4(col); };
     c[ImGuiCol_Text] = v(p.text);
     c[ImGuiCol_TextDisabled] = v(p.textDim);
-    c[ImGuiCol_WindowBg] = v(p.panel);
-    c[ImGuiCol_ChildBg] = v(withAlpha(p.panelAlt, 0.0f));
-    c[ImGuiCol_PopupBg] = v(p.panelAlt);
+    c[ImGuiCol_WindowBg] = v(p.bg);
+    c[ImGuiCol_ChildBg] = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_PopupBg] = v(p.surface);
     c[ImGuiCol_Border] = v(p.border);
     c[ImGuiCol_BorderShadow] = ImVec4(0, 0, 0, 0);
     c[ImGuiCol_FrameBg] = v(p.frame);
     c[ImGuiCol_FrameBgHovered] = v(p.frameHover);
     c[ImGuiCol_FrameBgActive] = v(p.frameHover);
-    c[ImGuiCol_TitleBg] = v(p.bg);
-    c[ImGuiCol_TitleBgActive] = v(p.bg);
-    c[ImGuiCol_TitleBgCollapsed] = v(p.bg);
-    c[ImGuiCol_MenuBarBg] = v(p.bg);
-    c[ImGuiCol_ScrollbarBg] = v(withAlpha(p.bg, 0.4f));
-    c[ImGuiCol_ScrollbarGrab] = v(p.frameHover);
+    c[ImGuiCol_TitleBg] = v(p.surface);
+    c[ImGuiCol_TitleBgActive] = v(p.surface);
+    c[ImGuiCol_TitleBgCollapsed] = v(p.surface);
+    c[ImGuiCol_MenuBarBg] = v(p.surface);
+    c[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_ScrollbarGrab] = v(p.lineSoft);
     c[ImGuiCol_ScrollbarGrabHovered] = v(p.border);
-    c[ImGuiCol_ScrollbarGrabActive] = v(p.accentDim);
-    c[ImGuiCol_CheckMark] = v(p.accent);
+    c[ImGuiCol_ScrollbarGrabActive] = v(p.textDim);
+    c[ImGuiCol_CheckMark] = v(p.accent); // also the radio-button dot
+    c[ImGuiCol_CheckboxSelectedBg] = v(p.accentTint);
+    c[ImGuiCol_InputTextCursor] = v(p.text);
+    c[ImGuiCol_TextLink] = v(p.link);
+    c[ImGuiCol_TreeLines] = v(p.lineSoft);
+    c[ImGuiCol_DragDropTarget] = v(p.accent);
+    c[ImGuiCol_DragDropTargetBg] = v(withAlpha(p.accent, 0.12f));
+    c[ImGuiCol_UnsavedMarker] = v(p.text);
+    c[ImGuiCol_NavWindowingHighlight] = v(withAlpha(p.surface, 0.7f));
+    c[ImGuiCol_NavWindowingDimBg] = ImVec4(0.11f, 0.13f, 0.19f, 0.25f);
+    c[ImGuiCol_PlotLinesHovered] = v(p.accent);
+    c[ImGuiCol_PlotHistogramHovered] = v(p.accent);
     c[ImGuiCol_SliderGrab] = v(p.accent);
     c[ImGuiCol_SliderGrabActive] = v(p.accent);
-    c[ImGuiCol_Button] = v(p.frame);
+    c[ImGuiCol_Button] = v(p.surface);
     c[ImGuiCol_ButtonHovered] = v(p.frameHover);
-    c[ImGuiCol_ButtonActive] = v(p.accentDim);
-    c[ImGuiCol_Header] = v(withAlpha(p.accent, 0.25f));
-    c[ImGuiCol_HeaderHovered] = v(withAlpha(p.accent, 0.35f));
-    c[ImGuiCol_HeaderActive] = v(withAlpha(p.accent, 0.5f));
-    c[ImGuiCol_Separator] = v(p.border);
-    c[ImGuiCol_SeparatorHovered] = v(p.accentDim);
+    c[ImGuiCol_ButtonActive] = v(p.segBg);
+    c[ImGuiCol_Header] = v(p.accentTint);
+    c[ImGuiCol_HeaderHovered] = v(p.segBg);
+    c[ImGuiCol_HeaderActive] = v(p.accentTint);
+    c[ImGuiCol_Separator] = v(p.line);
+    c[ImGuiCol_SeparatorHovered] = v(p.lineSoft);
     c[ImGuiCol_SeparatorActive] = v(p.accent);
-    c[ImGuiCol_ResizeGrip] = v(withAlpha(p.accent, 0.2f));
+    c[ImGuiCol_ResizeGrip] = ImVec4(0, 0, 0, 0);
     c[ImGuiCol_ResizeGripHovered] = v(withAlpha(p.accent, 0.5f));
     c[ImGuiCol_ResizeGripActive] = v(p.accent);
-    c[ImGuiCol_Tab] = v(p.bg);
-    c[ImGuiCol_TabHovered] = v(p.frameHover);
-    c[ImGuiCol_TabSelected] = v(p.panel);
+    c[ImGuiCol_Tab] = v(p.surface);
+    c[ImGuiCol_TabHovered] = v(p.segBg);
+    c[ImGuiCol_TabSelected] = v(p.segBg);
     c[ImGuiCol_TabSelectedOverline] = v(p.accent);
-    c[ImGuiCol_TabDimmed] = v(p.bg);
-    c[ImGuiCol_TabDimmedSelected] = v(p.panel);
-    c[ImGuiCol_TabDimmedSelectedOverline] = v(p.accentDim);
+    c[ImGuiCol_TabDimmed] = v(p.surface);
+    c[ImGuiCol_TabDimmedSelected] = v(p.segBg);
+    c[ImGuiCol_TabDimmedSelectedOverline] = v(p.accentTint);
     c[ImGuiCol_DockingPreview] = v(withAlpha(p.accent, 0.5f));
     c[ImGuiCol_DockingEmptyBg] = v(p.bg);
     c[ImGuiCol_PlotLines] = v(p.accent);
     c[ImGuiCol_PlotHistogram] = v(p.accent);
-    c[ImGuiCol_TableHeaderBg] = v(p.panelAlt);
-    c[ImGuiCol_TableBorderStrong] = v(p.border);
-    c[ImGuiCol_TableBorderLight] = v(withAlpha(p.border, 0.5f));
+    c[ImGuiCol_TableHeaderBg] = v(p.surfaceAlt);
+    c[ImGuiCol_TableBorderStrong] = v(p.lineSoft);
+    c[ImGuiCol_TableBorderLight] = v(p.line);
     c[ImGuiCol_TableRowBg] = ImVec4(0, 0, 0, 0);
-    c[ImGuiCol_TableRowBgAlt] = v(withAlpha(p.frame, 0.35f));
-    c[ImGuiCol_TextSelectedBg] = v(withAlpha(p.accent, 0.35f));
+    c[ImGuiCol_TableRowBgAlt] = v(p.surfaceAlt);
+    c[ImGuiCol_TextSelectedBg] = v(withAlpha(p.accent, 0.3f));
     c[ImGuiCol_NavCursor] = v(p.accent);
-    c[ImGuiCol_ModalWindowDimBg] = ImVec4(0, 0, 0, 0.55f);
+    c[ImGuiCol_ModalWindowDimBg] = g_dark ? ImVec4(0, 0, 0, 0.55f) : ImVec4(0.11f, 0.13f, 0.19f, 0.35f);
 
-    const float scale = dpiScale * userScale;
-    s.ScaleAllSizes(scale);
-    s.FontScaleDpi = scale;
+    g_scale = dpiScale * userScale;
+    s.ScaleAllSizes(g_scale);
+    s.FontScaleDpi = g_scale;
     s.FontSizeBase = g_fonts.baseSize;
 }
 

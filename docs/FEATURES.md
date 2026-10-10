@@ -103,7 +103,7 @@ Legend
 | Independent per microphone | Tested (each input/channel has its own network state) |
 | Real microphone | HW-verified (Blue Snowball, quiet room with background voices): room noise −56 → −68 dBFS, 1–1.4 % CPU |
 | Echo cancellation (speakers instead of headphones) | Tested with simulated room echo (35 ms delay + 120 ms tail): −42 dB after convergence standalone, −45 dB through the whole engine with the playback loopback as reference; double talk keeps the near-end voice (correlation 0.92, level −0.8 dB); transparent without a reference. Not yet verified with real speakers and room acoustics. |
-| Reference device selection, status (reference connected, echo reduction, double talk) | Implemented (Voice Lab > Noise & echo, Effects inspector) |
+| Reference device selection, status (reference connected, echo reduction, double talk) | Implemented (Voices > Noise & echo, effects editor) |
 
 Default chain order on a microphone: echo cancellation → noise suppression →
 gate/EQ/compression → voice transformation. Effects can be reordered freely.
@@ -153,7 +153,7 @@ gate/EQ/compression → voice transformation. Effects can be reordered freely.
 
 | Feature | Status |
 |---|---|
-| Dark/midnight/light themes, per-monitor DPI, UI scale, dockable re-arrangeable panels | Implemented (snapshots reviewed) |
+| "Friendly Pop" interface: Home, Voices, Mixer, Apps, Devices, Recorder and Settings screens, floating effects editor; light and dark themes, per-monitor DPI, interface size | Implemented (snapshots of every screen and setup step reviewed, light and dark) |
 | First-run setup wizard (8 steps) | Implemented (snapshots reviewed) |
 | Persistence (autosave, atomic writes, backup recovery), import/export | Tested |
 | Presets: 32 factory + user save/rename/duplicate/delete/import/export | Tested |

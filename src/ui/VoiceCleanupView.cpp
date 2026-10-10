@@ -1,5 +1,5 @@
-// Voice Lab "Noise & echo" tab and the shared status/controls for the noise
-// suppressor and echo canceller (also shown in the Effects inspector).
+// Noise & echo controls (Voices screen) and the shared status/controls for
+// the noise suppressor and echo canceller (also shown in the effects editor).
 #include <algorithm>
 #include <cstdio>
 
@@ -106,7 +106,7 @@ bool EchoApp::noiseSuppressionCheckbox(StripModel& strip, const char* label) {
         }
     }
     Tip("Neural background-noise removal (fans, keyboard and mouse clicks, air conditioning, hiss). Runs locally on "
-        "the CPU. More settings in Voice Lab > Noise & echo.");
+        "the CPU. More settings under Voices > Noise & echo.");
     return clicked;
 }
 

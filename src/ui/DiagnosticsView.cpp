@@ -72,10 +72,6 @@ std::string EchoApp::diagnosticReport() {
 }
 
 void EchoApp::drawDiagnostics() {
-    if (!ImGui::Begin("Diagnostics")) {
-        ImGui::End();
-        return;
-    }
     const Palette& p = pal();
     Engine& e = mc_->engine();
     EngineStats& st = e.stats();
@@ -215,7 +211,7 @@ void EchoApp::drawDiagnostics() {
             Tip("Writes a plain-text report (settings summary, devices, statistics, recent log). Nothing is sent anywhere.");
             ImGui::SameLine();
             if (ImGui::Button(ICON_COPY " Copy report")) ImGui::SetClipboardText(diagnosticReport().c_str());
-            ImGui::BeginChild("##log", ImVec2(0, 0), ImGuiChildFlags_Borders);
+            ImGui::BeginChild("##log", ImVec2(0, 360.0f * uiScale()), ImGuiChildFlags_Borders);
             ImGui::PushFont(fonts().mono, 0.0f);
             for (const auto& l : log::recent(400)) {
                 const ImU32 c = l.level == log::Level::Error ? p.bad : l.level == log::Level::Warn ? p.warn : p.textDim;
@@ -228,7 +224,6 @@ void EchoApp::drawDiagnostics() {
         }
         ImGui::EndTabBar();
     }
-    ImGui::End();
 }
 
 } // namespace echo::ui

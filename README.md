@@ -9,13 +9,15 @@ local AI voice-conversion pipeline. No accounts, subscriptions, ads, telemetry o
 ## Quick start
 
 1. Install: run `Echo-<version>-setup-win64.exe` (per user, no admin), or unzip the portable build.
-2. Start Echo; the setup wizard picks your microphone and headphones.
+2. Start Echo; the setup guide picks your microphone and headphones.
 3. **Virtual microphone for Discord/OBS/games** needs a virtual audio cable driver (e.g. free
-   VB-CABLE from vb-audio.com). Install it, press Rescan in Devices; then in Discord choose
-   `CABLE Output` as the input device. See `docs/VIRTUAL_DEVICES.md`.
-4. Voice Lab: one-click voices (deep, chipmunk, robot, monster, radio, ...), pitch/formant
-   sliders and pitch correction. **Noise & echo**: noise suppression strength, voice gate,
-   and echo cancellation for people using speakers instead of headphones.
+   VB-CABLE from vb-audio.com). Install it, press Rescan on the Devices screen; then in Discord
+   choose `CABLE Output` as the input device. See `docs/VIRTUAL_DEVICES.md`.
+4. **Home**: mute, push to talk status, noise removal, hearing yourself and quick voices.
+   **Voices**: one-click voices (deep, chipmunk, robot, monster, radio, ...) with the delay each
+   adds, pitch/formant and pitch correction, noise removal, voice gate and echo cancellation.
+   **Mixer**, **Apps**, **Devices**, **Recorder** and **Settings** (including push-to-talk and
+   mute hotkeys) are the other screens.
 
 ## Build
 

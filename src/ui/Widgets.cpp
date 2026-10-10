@@ -107,10 +107,11 @@ bool Fader(const char* id, float* db, ImVec2 size, ImU32 color, float minDb, flo
     dl->AddRectFilled(ImVec2(cx - 2.5f, ky), ImVec2(cx + 2.5f, trackBot), withAlpha(color, 0.75f), 2.5f);
     // Knob.
     const ImVec2 k0(pos.x + 3, ky - knobH * 0.5f), k1(pos.x + size.x - 3, ky + knobH * 0.5f);
-    dl->AddRectFilled(ImVec2(k0.x + 1, k0.y + 2), ImVec2(k1.x + 1, k1.y + 2), IM_COL32(0, 0, 0, 90), 4.0f);
-    dl->AddRectFilled(k0, k1, active ? p.frameHover : (hovered ? IM_COL32(70, 78, 96, 255) : IM_COL32(58, 65, 80, 255)), 4.0f);
-    dl->AddRect(k0, k1, withAlpha(color, 0.9f), 4.0f, 1.5f);
-    dl->AddLine(ImVec2(k0.x + 4, ky), ImVec2(k1.x - 4, ky), p.text, 2.0f);
+    const float sc = uiScale();
+    dl->AddRectFilled(ImVec2(k0.x, k0.y + 2 * sc), ImVec2(k1.x, k1.y + 2 * sc), p.shadow, 6.0f * sc);
+    dl->AddRectFilled(k0, k1, active ? p.segBg : (hovered ? p.frameHover : p.surface), 6.0f * sc);
+    dl->AddRect(k0, k1, p.outline, 6.0f * sc, 1.5f * sc);
+    dl->AddLine(ImVec2(k0.x + 5 * sc, ky), ImVec2(k1.x - 5 * sc, ky), color, 2.0f * sc);
 
     if (hovered || active) {
         char buf[32];
@@ -150,7 +151,7 @@ void LevelMeter(const char* id, MeterBallistics& m, ImVec2 size, bool stereo, bo
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float ledH = 6.0f;
     const ImVec2 led0 = pos, led1(pos.x + size.x, pos.y + ledH);
-    dl->AddRectFilled(led0, led1, m.clipLatched ? p.bad : withAlpha(p.bad, 0.15f), 2.0f);
+    dl->AddRectFilled(led0, led1, m.clipLatched ? p.bad : p.badTint, 2.0f);
     const float top = pos.y + ledH + 2.0f, bot = pos.y + size.y;
     const float h = bot - top;
     const int nch = stereo ? 2 : 1;
@@ -158,19 +159,19 @@ void LevelMeter(const char* id, MeterBallistics& m, ImVec2 size, bool stereo, bo
     const float bw = (size.x - gap * (nch - 1)) / nch;
     for (int c = 0; c < nch; ++c) {
         const float x0 = pos.x + c * (bw + gap), x1 = x0 + bw;
-        dl->AddRectFilled(ImVec2(x0, top), ImVec2(x1, bot), p.meterBg, 2.0f);
+        dl->AddRectFilled(ImVec2(x0, top), ImVec2(x1, bot), p.meterBg, 3.0f);
         const float level = meterPos(m.levelDb[c]);
-        // Segmented gradient: green -> yellow (-12) -> red (-3)
+        // Green -> amber (-12) -> red (-3)
         const float yG = bot - h * std::min(level, meterPos(-12.0f));
-        dl->AddRectFilled(ImVec2(x0, yG), ImVec2(x1, bot), p.good);
+        dl->AddRectFilled(ImVec2(x0, yG), ImVec2(x1, bot), p.meterGreen, 3.0f, ImDrawFlags_RoundCornersBottom);
         if (level > meterPos(-12.0f)) {
             const float yY = bot - h * std::min(level, meterPos(-3.0f));
-            dl->AddRectFilled(ImVec2(x0, yY), ImVec2(x1, yG), p.warn);
+            dl->AddRectFilled(ImVec2(x0, yY), ImVec2(x1, yG), p.meterAmber);
             if (level > meterPos(-3.0f)) dl->AddRectFilled(ImVec2(x0, bot - h * level), ImVec2(x1, yY), p.bad);
         }
         // RMS line and peak hold.
         const float rmsY = bot - h * meterPos(m.rmsDb[c]);
-        if (m.rmsDb[c] > -60.0f) dl->AddLine(ImVec2(x0, rmsY), ImVec2(x1, rmsY), IM_COL32(255, 255, 255, 70), 1.0f);
+        if (m.rmsDb[c] > -60.0f) dl->AddLine(ImVec2(x0, rmsY), ImVec2(x1, rmsY), withAlpha(p.surface, 0.6f), 1.0f);
         if (m.holdDb[c] > -60.0f) {
             const float hy = bot - h * meterPos(m.holdDb[c]);
             dl->AddLine(ImVec2(x0, hy), ImVec2(x1, hy), m.holdDb[c] > -3.0f ? p.bad : p.text, 2.0f);
@@ -203,13 +204,13 @@ void HLevelMeter(const char* id, MeterBallistics& m, ImVec2 size) {
     const float gap = 2.0f, bh = (size.y - gap) * 0.5f;
     for (int c = 0; c < 2; ++c) {
         const float y0 = pos.y + c * (bh + gap), y1 = y0 + bh;
-        dl->AddRectFilled(ImVec2(pos.x, y0), ImVec2(pos.x + size.x, y1), p.meterBg, 2.0f);
+        dl->AddRectFilled(ImVec2(pos.x, y0), ImVec2(pos.x + size.x, y1), p.meterBg, 3.0f);
         const float f = meterPos(m.levelDb[c]);
         const float xg = pos.x + size.x * std::min(f, meterPos(-12.0f));
-        dl->AddRectFilled(ImVec2(pos.x, y0), ImVec2(xg, y1), p.good);
+        dl->AddRectFilled(ImVec2(pos.x, y0), ImVec2(xg, y1), p.meterGreen, 3.0f, ImDrawFlags_RoundCornersLeft);
         if (f > meterPos(-12.0f)) {
             const float xy = pos.x + size.x * std::min(f, meterPos(-3.0f));
-            dl->AddRectFilled(ImVec2(xg, y0), ImVec2(xy, y1), p.warn);
+            dl->AddRectFilled(ImVec2(xg, y0), ImVec2(xy, y1), p.meterAmber);
             if (f > meterPos(-3.0f)) dl->AddRectFilled(ImVec2(xy, y0), ImVec2(pos.x + size.x * f, y1), p.bad);
         }
         if (m.holdDb[c] > -60.0f) {
@@ -234,10 +235,10 @@ void MiniMeter(float levelDb, ImVec2 size) {
     const ImVec2 pos = ImGui::GetCursorScreenPos();
     ImGui::Dummy(size);
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), p.meterBg, 2.0f);
+    dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), p.meterBg, size.y * 0.45f);
     const float f = meterPos(levelDb);
-    const ImU32 col = levelDb > -3.0f ? p.bad : levelDb > -12.0f ? p.warn : p.good;
-    dl->AddRectFilled(pos, ImVec2(pos.x + size.x * f, pos.y + size.y), col, 2.0f);
+    const ImU32 col = levelDb > -3.0f ? p.bad : levelDb > -12.0f ? p.meterAmber : p.meterGreen;
+    if (f > 0.0f) dl->AddRectFilled(pos, ImVec2(pos.x + size.x * f, pos.y + size.y), col, size.y * 0.45f);
 }
 
 bool Knob(const char* label, float* value, float minV, float maxV, float defV, const char* fmt, bool logScale,
@@ -283,15 +284,16 @@ bool Knob(const char* label, float* value, float minV, float maxV, float defV, c
     const float r = diameter * 0.5f - 2.0f;
     const float a0 = kPi * 0.75f, a1 = kPi * 2.25f;
     const float n = toNorm(v);
-    dl->AddCircleFilled(c, r, hovered || active ? p.frameHover : p.frame, 32);
-    dl->PathArcTo(c, r - 1.5f, a0, a1, 32);
+    dl->AddCircleFilled(c, r, hovered || active ? p.frameHover : p.surface, 32);
+    dl->AddCircle(c, r, p.outline, 32, 1.5f * uiScale());
+    dl->PathArcTo(c, r - 4.0f * uiScale(), a0, a1, 32);
     dl->PathStroke(p.meterBg, 3.0f);
     // Bipolar ranges draw from the centre.
     const bool bipolar = minV < 0.0f && maxV > 0.0f && !logScale;
     const float aStart = bipolar ? a0 + (a1 - a0) * toNorm(0.0f) : a0;
     const float aVal = a0 + (a1 - a0) * n;
     if (std::fabs(aVal - aStart) > 0.01f) {
-        dl->PathArcTo(c, r - 1.5f, std::min(aStart, aVal), std::max(aStart, aVal), 32);
+        dl->PathArcTo(c, r - 4.0f * uiScale(), std::min(aStart, aVal), std::max(aStart, aVal), 32);
         dl->PathStroke(color, 3.0f);
     }
     const ImVec2 tip(c.x + std::cos(aVal) * (r - 5), c.y + std::sin(aVal) * (r - 5));
@@ -377,10 +379,10 @@ bool ParamControl(Effect& fx, int index, float knobDiameter) {
 bool ToggleButton(const char* label, bool* v, ImU32 onColor, ImVec2 size, const char* tooltip) {
     const Palette& p = pal();
     const bool on = *v;
-    ImGui::PushStyleColor(ImGuiCol_Button, on ? onColor : p.frame);
+    ImGui::PushStyleColor(ImGuiCol_Button, on ? onColor : p.surface);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, on ? withAlpha(onColor, 0.85f) : p.frameHover);
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, on ? withAlpha(onColor, 0.7f) : p.frameHover);
-    ImGui::PushStyleColor(ImGuiCol_Text, on ? IM_COL32(15, 17, 22, 255) : p.text);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, on ? withAlpha(onColor, 0.7f) : p.segBg);
+    ImGui::PushStyleColor(ImGuiCol_Text, on ? hex(0x1C2230) : p.text);
     const bool clicked = ImGui::Button(label, size);
     ImGui::PopStyleColor(4);
     if (tooltip) Tip(tooltip);

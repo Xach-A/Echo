@@ -2,11 +2,14 @@
 #include <windows.h>
 #include <shellapi.h>
 
+#include <cstdio>
+
 #include "audio/VirtualCables.h"
 #include "imgui.h"
 #include "session/Presets.h"
 #include "ui/App.h"
 #include "ui/Icons.h"
+#include "ui/Pop.h"
 #include "ui/Theme.h"
 #include "ui/Widgets.h"
 
@@ -24,34 +27,63 @@ void EchoApp::drawWizard() {
     const Palette& p = pal();
     Session& s = mc_->session();
     const ImGuiViewport* vp = ImGui::GetMainViewport();
-    const ImVec2 size(std::min(780.0f * dpi_, vp->WorkSize.x * 0.92f), std::min(580.0f * dpi_, vp->WorkSize.y * 0.9f));
+    const float sc = uiScale();
+    const ImVec2 size(std::min(860.0f * sc, vp->WorkSize.x * 0.94f), std::min(640.0f * sc, vp->WorkSize.y * 0.92f));
     ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + vp->WorkSize.y * 0.5f),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(size, ImGuiCond_Always);
     if (!ImGui::IsPopupOpen("Echo setup")) ImGui::OpenPopup("Echo setup");
     bool open = true;
-    if (!ImGui::BeginPopupModal("Echo setup", &open, ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoResize)) {
-        if (!open) { // closed with the window's X button
-            s.firstRunCompleted = true;
-            wizardOpen_ = false;
-        }
-        return;
-    }
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, toVec4(p.surface));
+    ImGui::PushStyleColor(ImGuiCol_Border, toVec4(p.outline));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 16.0f * sc);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.5f * sc);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(28.0f * sc, 24.0f * sc));
+    const bool shown = ImGui::BeginPopupModal("Echo setup", nullptr,
+                                              ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar |
+                                                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor(2);
+    if (!shown) return;
     if (wizardCloseRequest_) {
         wizardCloseRequest_ = false;
         open = false;
     }
-    // Step indicator.
-    for (int i = 0; i < kSteps; ++i) {
-        if (i) ImGui::SameLine();
-        const ImU32 c = i == wizardStep_ ? p.accent : i < wizardStep_ ? p.good : p.textDim;
-        ImGui::TextColored(toVec4(c), "%d %s", i + 1, i == wizardStep_ ? kStepTitles[i] : "");
+    // Step indicator: a bar and a numbered dot per step.
+    {
+        const char* shortNames[kSteps] = {"Welcome", "Microphone", "Headphones", "Audio", "Virtual mic", "Test", "Routing", "Use it"};
+        const float w = ImGui::GetContentRegionAvail().x, gap = 6.0f * sc;
+        const float colW = (w - gap * (kSteps - 1)) / kSteps;
+        const ImVec2 o = ImGui::GetCursorScreenPos();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        for (int i = 0; i < kSteps; ++i) {
+            const float x = o.x + i * (colW + gap);
+            const bool done = i < wizardStep_, cur = i == wizardStep_;
+            dl->AddRectFilled(ImVec2(x, o.y), ImVec2(x + colW, o.y + 6.0f * sc), done || cur ? p.accent : p.line, 3.0f * sc);
+            const ImVec2 c(x + 10.0f * sc, o.y + 24.0f * sc);
+            dl->AddCircleFilled(c, 10.0f * sc, done ? p.primary : cur ? p.accent : p.surface, 20);
+            dl->AddCircle(c, 10.0f * sc, done || cur ? p.outline : p.lineSoft, 20, 1.5f * sc);
+            char num[4];
+            std::snprintf(num, sizeof(num), "%d", i + 1);
+            ImGui::PushFont(fonts().semibold, 11.0f);
+            const ImVec2 ns = ImGui::CalcTextSize(done ? ICON_CHECK : num);
+            dl->AddText(ImVec2(c.x - ns.x * 0.5f, c.y - ns.y * 0.5f), done ? p.onPrimary : p.text, done ? ICON_CHECK : num);
+            ImGui::PopFont();
+            ImGui::PushFont(cur ? fonts().semibold : fonts().regular, 12.0f);
+            dl->PushClipRect(ImVec2(x, o.y), ImVec2(x + colW, o.y + 40.0f * sc), true);
+            dl->AddText(ImVec2(x + 25.0f * sc, c.y - ImGui::GetFontSize() * 0.5f), cur || done ? p.text : p.textDim, shortNames[i]);
+            dl->PopClipRect();
+            ImGui::PopFont();
+        }
+        ImGui::Dummy(ImVec2(w, 40.0f * sc));
     }
-    ImGui::Separator();
-    ImGui::BeginChild("##wizbody", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * 1.4f));
-    ImGui::PushFont(fonts().semibold, fonts().baseSize * 1.35f);
+    ImGui::PushFont(fonts().regular, 13.0f);
+    ImGui::TextColored(toVec4(p.textDim), "Step %d of %d", wizardStep_ + 1, kSteps);
+    ImGui::PopFont();
+    ImGui::PushFont(fonts().semibold, 26.0f);
     ImGui::TextUnformatted(kStepTitles[wizardStep_]);
     ImGui::PopFont();
+    ImGui::BeginChild("##wizbody", ImVec2(0, -56.0f * sc));
     ImGui::Spacing();
 
     // Helpers to find/create the main mic strip and headphone/virtual buses.
@@ -74,7 +106,7 @@ void EchoApp::drawWizard() {
         ImGui::BulletText("check that your voice reaches it.");
         ImGui::Spacing();
         ImGui::TextWrapped("Echo never changes your Windows default devices, needs no account and works offline. You "
-                           "can re-run this wizard from Help > Setup wizard (F1).");
+                           "can run it again from Settings > Startup & data, or with F1.");
         break;
     case 1: {
         StripModel* mic = micStrip();
@@ -259,7 +291,7 @@ void EchoApp::drawWizard() {
         }
         if (mic) {
             ImGui::Spacing();
-            ImGui::TextWrapped("Optional: start with a clean voice preset (you can change it any time in the Voice Lab):");
+            ImGui::TextWrapped("Optional: start with a clean voice preset (you can change it any time on the Voices screen):");
             for (const char* n : {"Clean Microphone", "Noise-Reduced Microphone", "Streaming Voice"}) {
                 if (const ChainPreset* pr = presets_.find(n)) {
                     if (ImGui::Button(n)) applyChainPreset(ChainTarget{false, mic->id}, *pr);
@@ -271,7 +303,7 @@ void EchoApp::drawWizard() {
         break;
     }
     case 6:
-        ImGui::TextWrapped("How should audio be routed? (You can change this later in the Routing view.)");
+        ImGui::TextWrapped("How should audio be routed? (You can change this later in the Mixer.)");
         for (int i = 0; i < static_cast<int>(ScenePreset::Count); ++i) {
             ImGui::RadioButton(scenePresetName(static_cast<ScenePreset>(i)), &g_scene, i);
             ImGui::TextDisabled("   %s", scenePresetDescription(static_cast<ScenePreset>(i)));
@@ -292,23 +324,33 @@ void EchoApp::drawWizard() {
                            "recording software. If the app shows no signal, make sure Echo's virtual mic bus meter "
                            "is moving and that the app is not using its own exclusive mode.");
         ImGui::Spacing();
-        ImGui::TextWrapped("Tip: Voice Lab has one-click voice characters and pitch correction; Applications lets you "
+        ImGui::TextWrapped("Tip: Voices has one-click voice characters and pitch correction; Apps lets you "
                            "capture music or game audio per app.");
         break;
     }
     }
     ImGui::EndChild();
-    ImGui::Separator();
-    ImGui::BeginDisabled(wizardStep_ == 0);
-    if (ImGui::Button("Back", ImVec2(110 * dpi_, 0))) --wizardStep_;
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    if (wizardStep_ < kSteps - 1) {
-        if (ImGui::Button("Next", ImVec2(110 * dpi_, 0))) ++wizardStep_;
-        ImGui::SameLine();
-        if (ImGui::Button("Skip setup", ImVec2(110 * dpi_, 0))) open = false;
-    } else if (ImGui::Button("Finish", ImVec2(110 * dpi_, 0))) {
-        open = false;
+    // Footer: Back on the left, Skip and Next / Finish on the right.
+    {
+        const float w = ImGui::GetContentRegionAvail().x;
+        const float x0 = ImGui::GetStyle().WindowPadding.x;
+        const float y = ImGui::GetWindowHeight() - ImGui::GetStyle().WindowPadding.y - 44.0f * sc;
+        ImGui::SetCursorPos(ImVec2(x0, y));
+        if (wizardStep_ > 0) {
+            if (pop::Button("Back", pop::Btn::Secondary, ImVec2(110.0f * sc, 44.0f * sc))) --wizardStep_;
+        } else {
+            ImGui::Dummy(ImVec2(110.0f * sc, 44.0f * sc));
+        }
+        if (wizardStep_ < kSteps - 1) {
+            ImGui::SetCursorPos(ImVec2(x0 + w - 250.0f * sc, y + 12.0f * sc));
+            if (pop::LinkButton("Skip setup")) open = false;
+        }
+        ImGui::SetCursorPos(ImVec2(x0 + w - 140.0f * sc, y));
+        if (wizardStep_ < kSteps - 1) {
+            if (pop::Button(wizardStep_ == 0 ? "Get started" : "Next", pop::Btn::Primary, ImVec2(140.0f * sc, 44.0f * sc))) ++wizardStep_;
+        } else if (pop::Button("Finish", pop::Btn::Accent, ImVec2(140.0f * sc, 44.0f * sc))) {
+            open = false;
+        }
     }
     if (!open) {
         if (g_toneOn) {

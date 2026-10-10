@@ -62,7 +62,8 @@ machine:
 
 `Echo.exe --ui-snapshots=<dir>` renders all pages and every setup-wizard step
 into PNG files using a throwaway profile, with real devices running. All 17
-snapshots (18 since Settings > Hotkeys was added) (including Voice Lab > Noise & echo with live noise suppression and
+snapshots (22 since the Friendly Pop redesign: every screen, the effects editor, Settings sections, all 8 setup
+steps and Home in the dark theme) (including the Voices screen's noise & echo controls with live noise suppression and
 echo cancellation on the real microphone) were reviewed; the app ran with live metering from the real
 microphone, 0 dropouts, ~1 % DSP load, and exited cleanly. Normal launch,
 first-run wizard, autosave, and clean shutdown were also checked by hand.
