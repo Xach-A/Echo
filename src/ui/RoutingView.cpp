@@ -13,10 +13,6 @@
 namespace echo::ui {
 
 void EchoApp::drawRouting() {
-    if (!ImGui::Begin("Routing")) {
-        ImGui::End();
-        return;
-    }
     const Palette& p = pal();
     Session& s = mc_->session();
 
@@ -86,12 +82,11 @@ void EchoApp::drawRouting() {
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Signal flow")) {
-            drawFlowDiagram(ImGui::GetContentRegionAvail());
+            drawFlowDiagram(ImVec2(ImGui::GetContentRegionAvail().x, 360.0f * uiScale()));
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
     }
-    ImGui::End();
 }
 
 void EchoApp::drawFlowDiagram(ImVec2 size) {

@@ -132,6 +132,7 @@ json sessionToJson(const Session& s) {
             {"id", st.id},
             {"name", st.name},
             {"color", st.color},
+            {"voice", st.voice},
             {"group", groupToString(st.group)},
             {"source",
              {{"kind", kindToString(st.source.kind)},
@@ -197,7 +198,7 @@ json sessionToJson(const Session& s) {
                    {"feedbackProtection", s.engine.feedbackProtection},
                    {"clockBusId", s.engine.clockBusId}};
     j["recorder"] = {{"folder", s.recorder.folder}, {"bitDepth", s.recorder.bitDepth}, {"sampleRate", s.recorder.sampleRate}};
-    j["ui"] = {{"theme", s.ui.theme},
+    j["ui"] = {{"themeMode", s.ui.theme},
                {"uiScale", s.ui.uiScale},
                {"windowX", s.ui.windowX},
                {"windowY", s.ui.windowY},
@@ -206,7 +207,13 @@ json sessionToJson(const Session& s) {
                {"maximized", s.ui.maximized},
                {"showTooltips", s.ui.showTooltips},
                {"compactStrips", s.ui.compactStrips},
-               {"accent", s.ui.accent}};
+               {"accent", s.ui.accent},
+               {"closeToTray", s.ui.closeToTray}};
+    auto binding = [](const KeyBinding& b) { return json{{"key", b.key}, {"mods", b.mods}}; };
+    j["hotkeys"] = {{"talkMode", static_cast<int>(s.hotkeys.talkMode)},
+                    {"talkKey", binding(s.hotkeys.talkKey)},
+                    {"muteKey", binding(s.hotkeys.muteKey)},
+                    {"releaseDelayMs", s.hotkeys.releaseDelayMs}};
     return j;
 }
 
@@ -253,6 +260,7 @@ bool sessionFromJson(const json& j, Session& out, std::vector<std::string>* warn
             StripModel st;
             st.id = get<uint32_t>(sj, "id", s.nextId++);
             st.name = get<std::string>(sj, "name", "Input");
+            st.voice = get<std::string>(sj, "voice", "");
             st.color = get<uint32_t>(sj, "color", st.color);
             st.group = groupFromString(get<std::string>(sj, "group", "hardware"));
             if (auto src = sj.find("source"); src != sj.end()) {
@@ -324,7 +332,15 @@ bool sessionFromJson(const json& j, Session& out, std::vector<std::string>* warn
         s.recorder.sampleRate = get<int>(*r, "sampleRate", 0);
     }
     if (auto u = j.find("ui"); u != j.end()) {
-        s.ui.theme = get<int>(*u, "theme", 0);
+        if (u->contains("themeMode")) {
+            s.ui.theme = clampv(get<int>(*u, "themeMode", 0), 0, 2);
+        } else {
+            // Before the Friendly Pop redesign: 0 dark (the default), 1
+            // midnight, 2 light, 3 match Windows; blue was the default accent.
+            // Defaults move to the new defaults; explicit choices are kept.
+            const int old = get<int>(*u, "theme", 0);
+            s.ui.theme = old == 1 ? 1 : old == 3 ? 2 : 0;
+        }
         s.ui.uiScale = clampv(get<float>(*u, "uiScale", 1.0f), 0.6f, 2.5f);
         s.ui.windowX = get<int>(*u, "windowX", -1);
         s.ui.windowY = get<int>(*u, "windowY", -1);
@@ -333,7 +349,24 @@ bool sessionFromJson(const json& j, Session& out, std::vector<std::string>* warn
         s.ui.maximized = get<bool>(*u, "maximized", false);
         s.ui.showTooltips = get<bool>(*u, "showTooltips", true);
         s.ui.compactStrips = get<bool>(*u, "compactStrips", false);
-        s.ui.accent = get<std::string>(*u, "accent", "blue");
+        s.ui.accent = get<std::string>(*u, "accent", "coral");
+        if (!u->contains("themeMode") && s.ui.accent == "blue") s.ui.accent = "coral";
+        s.ui.closeToTray = get<bool>(*u, "closeToTray", false);
+    }
+    if (auto h = j.find("hotkeys"); h != j.end() && h->is_object()) {
+        auto binding = [&](const char* name) {
+            KeyBinding b;
+            if (auto k = h->find(name); k != h->end() && k->is_object()) {
+                b.key = get<int>(*k, "key", 0);
+                b.mods = get<int>(*k, "mods", 0) & (KeyModCtrl | KeyModShift | KeyModAlt | KeyModWin);
+                if (!isBindableKey(b.key)) b = {};
+            }
+            return b;
+        };
+        s.hotkeys.talkMode = static_cast<TalkMode>(clampv(get<int>(*h, "talkMode", 0), 0, 2));
+        s.hotkeys.talkKey = binding("talkKey");
+        s.hotkeys.muteKey = binding("muteKey");
+        s.hotkeys.releaseDelayMs = clampv(get<int>(*h, "releaseDelayMs", 200), 0, 2000);
     }
     out = std::move(s);
     return true;

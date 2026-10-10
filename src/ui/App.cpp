@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <shellapi.h>
+#include <dwmapi.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -12,11 +13,13 @@
 #include "core/Log.h"
 #include "core/Text.h"
 #include "dsp/EffectRegistry.h"
+#include "dsp/NoiseSuppressorInfo.h"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "session/Paths.h"
 #include "session/Serialization.h"
 #include "ui/Icons.h"
+#include "ui/Pop.h"
 #include "ui/Theme.h"
 #include "ui/Widgets.h"
 
@@ -83,12 +86,21 @@ bool EchoApp::init(HWND hwnd, ID3D11Device* device, bool safeMode, std::string* 
         mc_->start();
     }
     lastSavedJson_ = sessionToJson(mc_->session()).dump();
+    // Push to talk: the hotkey thread opens and closes the engine's
+    // microphone gate directly, so it responds within a few milliseconds.
+    hotkeys_ = std::make_unique<win::HotkeyService>();
+    hotkeys_->setSettings(mc_->session().hotkeys);
+    appliedHotkeys_ = mc_->session().hotkeys;
+    hotkeysApplied_ = true;
+    Engine* engine = &mc_->engine();
+    hotkeys_->start([engine](bool open) { engine->setMicGate(open); });
     if (!mc_->session().firstRunCompleted) openWizard();
     setTooltipsEnabled(mc_->session().ui.showTooltips);
     return true;
 }
 
 void EchoApp::shutdown() {
+    if (hotkeys_) hotkeys_->stop();
     saveNow();
     if (mc_) mc_->stop();
     textures_.clear();
@@ -116,7 +128,36 @@ void EchoApp::autosave(double now) {
 
 void EchoApp::setDpiScale(float s) {
     dpi_ = s;
-    applyTheme(mc_ ? mc_->session().ui.theme : 0, dpi_, mc_ ? mc_->session().ui.uiScale : 1.0f);
+    applyTheme(mc_ ? mc_->session().ui.theme : 0, dpi_, mc_ ? mc_->session().ui.uiScale : 1.0f,
+               mc_ ? mc_->session().ui.accent : std::string("blue"));
+    if (hwnd_) {
+        BOOL dark = themeIsDark() ? TRUE : FALSE;
+        DwmSetWindowAttribute(hwnd_, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
+    }
+}
+
+void EchoApp::onSystemThemeChanged() {
+    if (mc_ && mc_->session().ui.theme == 3) setDpiScale(dpi_);
+}
+
+void EchoApp::toggleMicrophoneMute() {
+    if (!mc_) return;
+    const bool mute = !mc_->microphonesMuted();
+    mc_->setMicrophonesMuted(mute);
+    ECHO_LOG_INFO("Microphones %s", mute ? "muted" : "unmuted");
+}
+
+void EchoApp::pollHotkeys() {
+    if (!hotkeys_) return;
+    // Settings edited in the UI, loaded from a file or reset.
+    const HotkeySettings& h = mc_->session().hotkeys;
+    if (!hotkeysApplied_ || h.talkMode != appliedHotkeys_.talkMode || h.talkKey != appliedHotkeys_.talkKey ||
+        h.muteKey != appliedHotkeys_.muteKey || h.releaseDelayMs != appliedHotkeys_.releaseDelayMs) {
+        hotkeys_->setSettings(h);
+        appliedHotkeys_ = h;
+        hotkeysApplied_ = true;
+    }
+    for (int n = hotkeys_->takeMuteToggles(); n > 0; --n) toggleMicrophoneMute();
 }
 
 void EchoApp::toast(const std::string& text, int level) {
@@ -159,6 +200,8 @@ void EchoApp::applyChainPreset(const ChainTarget& t, const ChainPreset& p) {
     std::vector<std::string> warnings;
     auto chain = chainFromJson(p.chain, &warnings);
     mc_->applyPresetChain(t, std::move(chain)); // keeps the input's noise suppression / echo cancellation
+    if (!t.bus)
+        if (StripModel* st = mc_->session().strip(t.id)) st->voice = p.name;
     for (const auto& w : warnings) toast(w, 2);
     toast("Loaded preset '" + p.name + "'", 1);
 }
@@ -252,7 +295,7 @@ bool EchoApp::sourcePicker(const char* popupId, SourceRef& out, StripGroup* grou
                 pick(r, StripGroup::Virtual, "Virtual Input");
             }
         }
-        if (!any) ImGui::TextDisabled("No virtual cable installed (see Devices)");
+        if (!any) ImGui::TextDisabled("No virtual cable installed (see the Devices screen)");
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu(ICON_SPEAKERS "  Output loopback (what you hear)")) {
@@ -300,7 +343,7 @@ bool EchoApp::outputPicker(const char* popupId, OutputRef& out, bool virtualOnly
         }
         if (d.isAppBound) Tip("Virtual device owned by another app; it only carries audio while that app runs.");
     }
-    if (!any) ImGui::TextDisabled(virtualOnly ? "No virtual cable installed. See Devices > Virtual devices." : "No devices");
+    if (!any) ImGui::TextDisabled(virtualOnly ? "No virtual cable installed. See the Devices screen." : "No devices");
     ImGui::Separator();
     if (ImGui::MenuItem("None (disconnect)")) {
         out = OutputRef{};
@@ -320,6 +363,7 @@ bool EchoApp::outputPicker(const char* popupId, OutputRef& out, bool virtualOnly
 void EchoApp::frame(double now, double dt) {
     now_ = now;
     mc_->update(now);
+    pollHotkeys();
     updateMeters(now, dt);
     if (now - lastAppRefresh_ > 1.0) {
         backend_->sessions().refresh();
@@ -344,26 +388,15 @@ void EchoApp::frame(double now, double dt) {
     }
 
     if (snapshotIndex_ >= 0) snapshotStep();
-    drawDockspace();
-    drawMixer();
-    drawInspector();
-    drawRouting();
-    drawVoiceLab();
-    drawApps();
-    drawDevices();
-    drawRecorder();
-    drawDiagnostics();
-    drawSettings();
+    handleFocusRequest();
+    drawShell();
+    if (effectsOpen_) drawInspector();
+    if (managePresets_) drawPresetManager();
     if (wizardOpen_) drawWizard();
-    if (showAbout_) drawAbout();
     if (showDemo_) ImGui::ShowDemoWindow(&showDemo_);
     drawToasts();
     for (auto& fn : deferred_) fn();
     deferred_.clear();
-    if (focusRequest_) {
-        ImGui::SetWindowFocus(focusRequest_);
-        focusRequest_ = nullptr;
-    }
     // Keyboard shortcuts.
     ImGuiIO& io = ImGui::GetIO();
     if (!io.WantTextInput) {
@@ -373,7 +406,7 @@ void EchoApp::frame(double now, double dt) {
         }
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_R)) {
             if (mc_->recorder().active()) mc_->stopRecording();
-            else focusWindow("Recorder");
+            else navigate(Page::Recorder);
         }
         if (ImGui::IsKeyPressed(ImGuiKey_F1)) openWizard();
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_B) && hasSelection_) {
@@ -396,24 +429,35 @@ void EchoApp::startSnapshots(const std::wstring& dir) {
 void EchoApp::snapshotStep() {
     struct Step {
         const char* file;
-        int wizard;          // wizard step to show, -1 = closed
-        const char* focus;   // window to bring to front
-        const char* preset;  // chain preset to apply to the first input
+        int wizard;         // wizard step to show, -1 = closed
+        Page page;
+        SettingsTab tab;
+        const char* preset; // voice preset for the microphone
+        bool effects;       // open the effects editor
     };
     static const Step steps[] = {
-        {"wizard-1-welcome", 0, nullptr, nullptr},     {"wizard-2-microphone", 1, nullptr, nullptr},
-        {"wizard-3-headphones", 2, nullptr, nullptr},  {"wizard-4-audio", 3, nullptr, nullptr},
-        {"wizard-5-virtual-mic", 4, nullptr, nullptr}, {"wizard-6-test", 5, nullptr, nullptr},
-        {"wizard-7-routing", 6, nullptr, nullptr},     {"wizard-8-use", 7, nullptr, nullptr},
-        {"mixer-effects", -1, "Effects", "Streaming Voice"},
-        {"voice-lab", -1, "Voice Lab", "Hard Autotune"},
-        {"voice-lab-noise-echo", -1, "Voice Lab", "Deep Voice"},
-        {"routing", -1, "Routing", nullptr},
-        {"applications", -1, "Applications", nullptr},
-        {"devices", -1, "Devices", nullptr},
-        {"recorder", -1, "Recorder", nullptr},
-        {"diagnostics", -1, "Diagnostics", nullptr},
-        {"settings", -1, "Settings", nullptr},
+        {"wizard-1-welcome", 0, Page::Home, SettingsTab::Audio, nullptr, false},
+        {"wizard-2-microphone", 1, Page::Home, SettingsTab::Audio, nullptr, false},
+        {"wizard-3-headphones", 2, Page::Home, SettingsTab::Audio, nullptr, false},
+        {"wizard-4-audio", 3, Page::Home, SettingsTab::Audio, nullptr, false},
+        {"wizard-5-virtual-mic", 4, Page::Home, SettingsTab::Audio, nullptr, false},
+        {"wizard-6-test", 5, Page::Home, SettingsTab::Audio, nullptr, false},
+        {"wizard-7-routing", 6, Page::Home, SettingsTab::Audio, nullptr, false},
+        {"wizard-8-use", 7, Page::Home, SettingsTab::Audio, nullptr, false},
+        {"home", -1, Page::Home, SettingsTab::Audio, "Deep Voice", false},
+        {"voices", -1, Page::Voices, SettingsTab::Audio, nullptr, false},
+        {"voices-autotune", -1, Page::Voices, SettingsTab::Audio, "Hard Autotune", false},
+        {"mixer", -1, Page::Mixer, SettingsTab::Audio, "Deep Voice", false},
+        {"mixer-effects", -1, Page::Mixer, SettingsTab::Audio, "Streaming Voice", true},
+        {"apps", -1, Page::Apps, SettingsTab::Audio, nullptr, false},
+        {"devices", -1, Page::Devices, SettingsTab::Audio, nullptr, false},
+        {"recorder", -1, Page::Recorder, SettingsTab::Audio, nullptr, false},
+        {"settings-audio", -1, Page::Settings, SettingsTab::Audio, nullptr, false},
+        {"settings-hotkeys", -1, Page::Settings, SettingsTab::Hotkeys, nullptr, false},
+        {"settings-appearance", -1, Page::Settings, SettingsTab::Appearance, nullptr, false},
+        {"settings-startup", -1, Page::Settings, SettingsTab::Startup, nullptr, false},
+        {"settings-diagnostics", -1, Page::Settings, SettingsTab::Diagnostics, nullptr, false},
+        {"home-dark", -1, Page::Home, SettingsTab::Audio, "Deep Voice", false},
     };
     constexpr int kCount = static_cast<int>(std::size(steps));
     if (snapshotIndex_ >= kCount) {
@@ -428,22 +472,24 @@ void EchoApp::snapshotStep() {
         } else if (wizardOpen_) {
             wizardCloseRequest_ = true;
         }
-        if (st.preset && !mc_->session().strips.empty()) {
-            if (const ChainPreset* p = presets_.find(st.preset)) applyChainPreset(ChainTarget{false, mc_->session().strips[0].id}, *p);
-            select(ChainTarget{false, mc_->session().strips[0].id});
+        page_ = st.page;
+        settingsTab_ = st.tab;
+        StripModel* mic = primaryMic();
+        if (st.preset && mic) {
+            if (const ChainPreset* p = presets_.find(st.preset)) applyVoice(*mic, p);
         }
-        if (st.focus) focusWindow(st.focus);
-        if (std::strcmp(st.file, "voice-lab-noise-echo") == 0 && !mc_->session().strips.empty()) {
-            // Show both cleanup effects: echo cancellation listening to the default speakers.
-            StripModel& mic = mc_->session().strips[0];
-            bool hasAec = false;
-            for (const auto& e : mic.chain) hasAec |= std::string(e->typeId()) == "echo_cancel";
-            if (!hasAec) {
-                mic.reference = SourceRef{};
-                mic.reference.kind = SourceKind::RenderLoopback;
-                mc_->addEffect(ChainTarget{false, mic.id}, "echo_cancel", 0);
-            }
-            voiceTabRequest_ = "Noise & echo";
+        effectsOpen_ = st.effects && mic;
+        if (mic) select(ChainTarget{false, mic->id});
+        if (st.tab == SettingsTab::Hotkeys || std::strcmp(st.file, "home") == 0) {
+            // Example bindings (snapshot mode runs on a throwaway profile).
+            HotkeySettings& h = mc_->session().hotkeys;
+            h.talkMode = TalkMode::PushToTalk;
+            h.talkKey = {vk::XButton2, 0};
+            h.muteKey = {'M', KeyModCtrl | KeyModShift};
+        }
+        if (std::strcmp(st.file, "home-dark") == 0) {
+            mc_->session().ui.theme = 1;
+            setDpiScale(dpi_);
         }
     }
     if (++snapshotFrame_ == 45) {
@@ -456,6 +502,7 @@ void EchoApp::snapshotStep() {
 void EchoApp::idle(double now) {
     now_ = now;
     mc_->update(now);
+    pollHotkeys();
     for (const auto& n : mc_->takeNotices()) toast(n, 1);
     autosave(now);
 }
@@ -467,247 +514,133 @@ void EchoApp::onResume() {
     toast("Audio restarted after the system resumed", 0);
 }
 
-void EchoApp::drawDockspace() {
-    const ImGuiViewport* vp = ImGui::GetMainViewport();
-    const float statusH = ImGui::GetFrameHeight() + 6.0f;
-    ImGui::SetNextWindowPos(vp->WorkPos);
-    ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x, vp->WorkSize.y - statusH));
-    ImGui::SetNextWindowViewport(vp->ID);
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
-                             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus |
-                             ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_MenuBar;
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 4));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, pal().bg);
-    ImGui::Begin("EchoRoot", nullptr, flags);
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar(3);
-    drawMenuBar();
-    const ImGuiID dockId = ImGui::GetID("EchoDock");
-    if (!layoutBuilt_ || resetLayout_) {
-        layoutBuilt_ = true;
-        if (resetLayout_ || !ImGui::DockBuilderGetNode(dockId) || ImGui::DockBuilderGetNode(dockId)->IsLeafNode()) {
-            ImGui::DockBuilderRemoveNode(dockId);
-            ImGui::DockBuilderAddNode(dockId, ImGuiDockNodeFlags_DockSpace);
-            ImGui::DockBuilderSetNodeSize(dockId, ImGui::GetContentRegionAvail());
-            ImGuiID main = dockId, right, bottom;
-            ImGui::DockBuilderSplitNode(main, ImGuiDir_Right, 0.30f, &right, &main);
-            ImGui::DockBuilderSplitNode(main, ImGuiDir_Down, 0.36f, &bottom, &main);
-            ImGui::DockBuilderDockWindow("Mixer", main);
-            ImGui::DockBuilderDockWindow("Effects", right);
-            ImGui::DockBuilderDockWindow("Voice Lab", bottom);
-            ImGui::DockBuilderDockWindow("Routing", bottom);
-            ImGui::DockBuilderDockWindow("Applications", bottom);
-            ImGui::DockBuilderDockWindow("Devices", bottom);
-            ImGui::DockBuilderDockWindow("Recorder", bottom);
-            ImGui::DockBuilderDockWindow("Diagnostics", bottom);
-            ImGui::DockBuilderDockWindow("Settings", bottom);
-            ImGui::DockBuilderFinish(dockId);
-        }
-        resetLayout_ = false;
-    }
-    ImGui::DockSpace(dockId, ImVec2(0, 0), ImGuiDockNodeFlags_None);
-    ImGui::End();
-    drawStatusBar();
-}
-
-void EchoApp::drawMenuBar() {
-    if (!ImGui::BeginMenuBar()) return;
-    ImGui::PushFont(fonts().semibold, 0.0f);
-    ImGui::TextColored(toVec4(pal().accent), ICON_WAVE " %s", ECHO_APP_NAME);
-    ImGui::PopFont();
-    ImGui::Spacing();
-    if (ImGui::BeginMenu("File")) {
-        if (ImGui::MenuItem(ICON_SAVE "  Save settings", "Ctrl+S")) {
-            saveNow();
-            toast("Settings saved", 1);
-        }
-        if (ImGui::MenuItem(ICON_OPEN "  Open settings folder")) ShellExecuteW(nullptr, L"open", paths::appDataDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-        ImGui::Separator();
-        if (ImGui::MenuItem("Export session...")) {
-            const std::wstring file = paths::appDataDir() + L"\\session-export.json";
-            std::string err;
-            if (saveJsonFile(file, sessionToJson(mc_->session()), &err)) {
-                toast("Exported to " + wideToUtf8(file), 1);
-                ShellExecuteW(nullptr, L"open", paths::appDataDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-            } else toast("Export failed: " + err, 3);
-        }
-        Tip("Writes session-export.json into the settings folder (portable, documented JSON).");
-        if (ImGui::MenuItem("Import session (session-import.json)")) {
-            json j;
-            std::string err;
-            Session s;
-            std::vector<std::string> warn;
-            if (loadJsonFile(paths::appDataDir() + L"\\session-import.json", j, &err, false) && sessionFromJson(j, s, &warn)) {
-                mc_->replaceSession(std::move(s));
-                toast("Session imported", 1);
-            } else {
-                toast("Place a session file named session-import.json in the settings folder first.", 2);
-            }
-        }
-        ImGui::Separator();
-        if (ImGui::MenuItem("Reset to defaults...")) openResetPopup_ = true;
-        ImGui::Separator();
-        if (ImGui::MenuItem("Exit", "Alt+F4")) quit_ = true;
-        ImGui::EndMenu();
-    }
-    if (ImGui::BeginMenu("Engine")) {
-        const bool running = mc_->running();
-        if (ImGui::MenuItem(running ? ICON_STOP "  Stop audio engine" : ICON_PLAY "  Start audio engine")) {
-            if (running) mc_->stop();
-            else mc_->start();
-        }
-        if (ImGui::MenuItem(ICON_REFRESH "  Restart audio engine")) mc_->restart();
-        if (ImGui::MenuItem(ICON_SYNC "  Rescan devices")) mc_->rescanDevices();
-        ImGui::Separator();
-        bool prot = mc_->session().engine.feedbackProtection;
-        if (ImGui::MenuItem("Feedback protection", nullptr, &prot)) {
-            mc_->session().engine.feedbackProtection = prot;
-            mc_->sendsChanged();
-        }
-        ImGui::EndMenu();
-    }
-    if (ImGui::BeginMenu("View")) {
-        for (const char* w : {"Mixer", "Effects", "Voice Lab", "Routing", "Applications", "Devices", "Recorder",
-                              "Diagnostics", "Settings"})
-            if (ImGui::MenuItem(w)) focusWindow(w);
-        ImGui::Separator();
-        if (ImGui::MenuItem("Reset window layout")) resetLayout_ = true;
-        ImGui::EndMenu();
-    }
-    if (ImGui::BeginMenu("Help")) {
-        if (ImGui::MenuItem(ICON_HELP "  Setup wizard", "F1")) openWizard();
-        if (ImGui::MenuItem("Documentation (docs folder)")) {
-            std::wstring docs = paths::executableDir() + L"\\docs";
-            ShellExecuteW(nullptr, L"open", docs.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-        }
-        if (ImGui::MenuItem("Open log folder"))
-            ShellExecuteW(nullptr, L"open", (paths::localDataDir() + L"\\logs").c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-        ImGui::Separator();
-        if (ImGui::MenuItem(ICON_INFO "  About Echo")) showAbout_ = true;
-        ImGui::EndMenu();
-    }
-    if (openResetPopup_) {
-        ImGui::OpenPopup("##reset");
-        openResetPopup_ = false;
-    }
-    if (ImGui::BeginPopupModal("##reset", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text("Reset all strips, buses, routing and effects to the defaults?");
-        ImGui::TextDisabled("User presets, recordings and models are kept.");
-        if (ImGui::Button("Reset", ImVec2(120, 0))) {
-            mc_->createDefaultSession();
-            mc_->session().firstRunCompleted = true;
-            toast("Configuration reset to defaults", 1);
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
-    // Right side: record indicator.
-    if (mc_->recorder().active()) {
-        const auto st = mc_->recorder().status();
-        ImGui::SameLine(ImGui::GetWindowWidth() - 240);
-        const bool blink = std::fmod(now_, 1.0) < 0.6;
-        ImGui::TextColored(toVec4(blink ? pal().bad : withAlpha(pal().bad, 0.4f)), ICON_RECORD " REC %s",
-                           formatDuration(st.seconds).c_str());
-    }
-    ImGui::EndMenuBar();
-}
-
-void EchoApp::drawStatusBar() {
-    const ImGuiViewport* vp = ImGui::GetMainViewport();
-    const float h = ImGui::GetFrameHeight() + 6.0f;
-    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, vp->WorkPos.y + vp->WorkSize.y - h));
-    ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x, h));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 3));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, pal().bg);
-    ImGui::Begin("##status", nullptr,
-                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDocking |
-                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar(2);
-    Engine& e = mc_->engine();
-    const bool running = e.running();
-    const ClockMode mode = static_cast<ClockMode>(e.stats().clockMode.load());
-    Led(running, running ? pal().good : pal().bad, ImGui::GetFontSize() * 0.3f);
-    ImGui::SameLine();
-    ImGui::Text("%s", running ? "Audio running" : "Audio stopped");
-    ImGui::SameLine(0, 20);
-    ImGui::TextDisabled("%d Hz  |  %d samples (%.1f ms)", e.sampleRate(), e.blockSize(), e.blockSeconds() * 1000.0);
-    ImGui::SameLine(0, 20);
-    const float cpu = e.stats().cpuLoad.load() * 100.0f;
-    ImGui::TextColored(toVec4(cpu > 70 ? pal().bad : cpu > 40 ? pal().warn : pal().textDim), "DSP %.1f%%", cpu);
-    Tip("Share of the audio block time spent processing (all strips, buses and effects).");
-    ImGui::SameLine(0, 20);
-    ImGui::TextDisabled("%s", mode == ClockMode::Device ? mc_->clockDescription().c_str()
-                              : mode == ClockMode::Timer ? "Internal timer clock" : "");
-    uint64_t under = 0, over = 0;
-    if (const GraphSnapshot* g = e.current()) {
-        for (int i = 0; i < g->numSources; ++i) under += g->sources[i]->underruns.load(), over += g->sources[i]->overruns.load();
-        for (int i = 0; i < g->numSinks; ++i) under += g->sinks[i]->underruns.load(), over += g->sinks[i]->overruns.load();
-    }
-    ImGui::SameLine(0, 20);
-    ImGui::TextColored(toVec4(under + over ? pal().warn : pal().textDim), "Dropouts: %llu", static_cast<unsigned long long>(under + over));
-    Tip("Buffer underruns + overruns across all devices since the engine started. See Diagnostics for details.");
-    if (!mc_->feedbackWarnings().empty()) {
-        ImGui::SameLine(0, 20);
-        ImGui::TextColored(toVec4(pal().warn), ICON_WARNING " Feedback loop blocked");
-        Tip(mc_->feedbackWarnings().front().text.c_str());
-    }
-    ImGui::SameLine(ImGui::GetWindowWidth() - 150);
-    ImGui::TextDisabled("%s v%s", ECHO_APP_NAME, ECHO_VERSION_STRING);
-    ImGui::End();
-}
-
 void EchoApp::drawToasts() {
     while (!toasts_.empty() && toasts_.front().expires < now_) toasts_.pop_front();
     if (toasts_.empty()) return;
+    const Palette& p = pal();
+    const float sc = uiScale();
     const ImGuiViewport* vp = ImGui::GetMainViewport();
-    float y = vp->WorkPos.y + vp->WorkSize.y - 60.0f * dpi_;
+    float y = vp->WorkPos.y + vp->WorkSize.y - 24.0f * sc;
     int i = 0;
     for (auto it = toasts_.rbegin(); it != toasts_.rend(); ++it, ++i) {
-        const ImU32 col = it->level == 1 ? pal().good : it->level == 2 ? pal().warn : it->level == 3 ? pal().bad : pal().accent;
-        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x - 20.0f, y), ImGuiCond_Always, ImVec2(1.0f, 1.0f));
-        ImGui::SetNextWindowBgAlpha(0.95f);
+        const ImU32 col = it->level == 1 ? p.good : it->level == 2 ? p.warn : it->level == 3 ? p.bad : p.accent;
+        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x - 24.0f * sc, y), ImGuiCond_Always, ImVec2(1.0f, 1.0f));
         char id[32];
         std::snprintf(id, sizeof(id), "##toast%d", i);
-        ImGui::PushStyleColor(ImGuiCol_Border, col);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, toVec4(p.surface));
+        ImGui::PushStyleColor(ImGuiCol_Border, toVec4(p.outline));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 14.0f * sc);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.5f * sc);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f * sc, 12.0f * sc));
         ImGui::Begin(id, nullptr,
                      ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
                          ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoDocking);
-        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
-        ImGui::TextColored(toVec4(col), "%s", it->level >= 2 ? ICON_WARNING : ICON_INFO);
-        ImGui::SameLine();
+        const ImVec2 c = ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(c.x + 5.0f * sc, c.y + ImGui::GetFontSize() * 0.55f), 5.0f * sc, col, 12);
+        ImGui::SetCursorScreenPos(ImVec2(c.x + 18.0f * sc, c.y));
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetFontSize() * 26.0f);
         ImGui::TextUnformatted(it->text.c_str());
         ImGui::PopTextWrapPos();
-        y -= ImGui::GetWindowHeight() + 8.0f;
+        y -= ImGui::GetWindowHeight() + 10.0f * sc;
         ImGui::End();
-        ImGui::PopStyleColor();
+        ImGui::PopStyleVar(3);
+        ImGui::PopStyleColor(2);
+    }
+}
+
+StripModel* EchoApp::primaryMic() {
+    for (auto& st : mc_->session().strips)
+        if (st.group == StripGroup::Hardware && st.source.kind == SourceKind::CaptureDevice) return &st;
+    for (auto& st : mc_->session().strips)
+        if (st.group == StripGroup::Hardware) return &st;
+    return nullptr;
+}
+
+BusModel* EchoApp::firstBus(BusKind kind) {
+    for (auto& b : mc_->session().buses)
+        if (b.kind == kind) return &b;
+    return nullptr;
+}
+
+double EchoApp::presetDelayMs(const ChainPreset& p) {
+    const int sr = mc_->engine().sampleRate();
+    if (sr != presetDelayRate_) {
+        presetDelayCache_.clear();
+        presetDelayRate_ = sr;
+    }
+    if (auto it = presetDelayCache_.find(p.name); it != presetDelayCache_.end()) return it->second;
+    // The input's own noise suppression / echo cancellation stays when a voice
+    // is applied, so only the voice's other effects add delay.
+    double samples = 0.0;
+    for (auto& e : chainFromJson(p.chain, nullptr)) {
+        const std::string type = e->typeId();
+        if (type == noiseSuppressorTypeId() || type == echoCancellerTypeId()) continue;
+        e->prepare(sr, mc_->engine().blockSize());
+        samples += e->latencySamples();
+    }
+    const double ms = samples * 1000.0 / sr;
+    presetDelayCache_[p.name] = ms;
+    return ms;
+}
+
+void EchoApp::applyVoice(StripModel& s, const ChainPreset* p) {
+    if (p) {
+        applyChainPreset(ChainTarget{false, s.id}, *p);
+        return;
+    }
+    mc_->applyPresetChain(ChainTarget{false, s.id}, {});
+    s.voice.clear();
+    toast("Original voice", 1);
+}
+
+void EchoApp::handleFocusRequest() {
+    if (!focusRequest_) return;
+    const std::string n = focusRequest_;
+    focusRequest_ = nullptr;
+    if (n == "Effects") {
+        effectsOpen_ = hasSelection_;
+    } else if (n == "Voice Lab") {
+        page_ = Page::Voices;
+    } else if (n == "Mixer") {
+        page_ = Page::Mixer;
+    } else if (n == "Routing") {
+        page_ = Page::Mixer;
+        routingOpen_ = true;
+    } else if (n == "Applications") {
+        page_ = Page::Apps;
+    } else if (n == "Devices") {
+        page_ = Page::Devices;
+    } else if (n == "Recorder") {
+        page_ = Page::Recorder;
+    } else if (n == "Diagnostics") {
+        openSettings(SettingsTab::Diagnostics);
+    } else if (n == "Settings") {
+        page_ = Page::Settings;
     }
 }
 
 void EchoApp::drawAbout() {
-    ImGui::SetNextWindowSize(ImVec2(560 * dpi_, 0), ImGuiCond_Appearing);
-    if (ImGui::Begin("About Echo", &showAbout_, ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoCollapse)) {
-        ImGui::PushFont(fonts().semibold, fonts().baseSize * 1.6f);
-        ImGui::TextColored(toVec4(pal().accent), ICON_WAVE " %s %s", ECHO_APP_NAME, ECHO_VERSION_STRING);
-        ImGui::PopFont();
-        ImGui::TextWrapped("Free, open-source virtual audio mixer and real-time voice changer for Windows. No accounts, "
-                           "no subscriptions, no telemetry, no network access. All audio is processed locally.");
-        ImGui::Separator();
-        ImGui::TextWrapped("Licensed under the MIT License. Third-party components: Dear ImGui (MIT), nlohmann/json (MIT), "
-                           "doctest (MIT, tests only). Optional: ONNX Runtime (MIT) when installed by the user. "
-                           "System fonts and icon fonts are used from Windows and are not redistributed.");
-        ImGui::TextWrapped("Virtual microphone/speaker endpoints are provided by a separately installed virtual audio "
-                           "cable driver (for example VB-CABLE), which has its own license.");
-        ImGui::Separator();
-        ImGui::TextDisabled("Settings: %s", wideToUtf8(paths::appDataDir()).c_str());
-        ImGui::TextDisabled("Logs: %s", wideToUtf8(paths::logFile()).c_str());
+    pop::BeginCard("##about");
+    ImGui::PushFont(fonts().semibold, 22.0f);
+    ImGui::TextUnformatted(ECHO_APP_NAME " " ECHO_VERSION_STRING);
+    ImGui::PopFont();
+    pop::Caption("Free, open-source virtual audio mixer and voice changer for Windows. No accounts, no subscriptions, "
+                 "no telemetry, no network access. All audio is processed on this computer.");
+    pop::Divider();
+    pop::Caption("Licensed under the MIT License. Third-party components: Dear ImGui (MIT), nlohmann/json (MIT), RNNoise "
+                 "(BSD-3-Clause), doctest (MIT, tests only). Optional: ONNX Runtime (MIT) when you install it. Windows "
+                 "system fonts and icon fonts are used, not redistributed.");
+    pop::Caption("The virtual microphone uses a virtual audio cable driver you install separately (for example "
+                 "VB-CABLE by VB-Audio), under its own license.");
+    pop::Divider();
+    pop::Hint(("Settings: " + wideToUtf8(paths::appDataDir())).c_str());
+    pop::Hint(("Logs: " + wideToUtf8(paths::logFile())).c_str());
+    ImGui::Dummy(ImVec2(0, 4));
+    if (pop::Button("Open documentation")) {
+        const std::wstring docs = paths::executableDir() + L"\\docs";
+        ShellExecuteW(nullptr, L"open", docs.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     }
-    ImGui::End();
+    pop::EndCard();
 }
 
 } // namespace echo::ui

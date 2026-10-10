@@ -56,12 +56,14 @@ machine:
 | `cables` — virtual cable loopback | PASS (VB-CABLE installed 2026-10-09): `CABLE Input` → `CABLE Output` and `CABLE In 16ch` → `CABLE Output`, −20.0 dBFS received, ~106–126 ms |
 | `virtualmic` — Echo's engine (headphones as clock) → `CABLE Input` → `CABLE Output` recorded by a separate stream | PASS: −20.0 dBFS (sent −20), 0 Echo render underruns, 0 recording discontinuities, ~150 ms; over 78 s after start-up 1 gap of ~10 ms. `cableraw` (no Echo engine) showed the same kind of gaps at a similar rate, so they come from the cable driver/Windows |
 | `denoise 12` — default mic through the engine with and without noise suppression (in memory only) | PASS: room noise −56.1 → −68.0 dBFS (−11.9 dB), CPU 1.0–1.4 % of one core, 20 ms latency. The room had background voices (voice probability up to 100 %), so speech preservation was judged by the automated speech tests, not here. |
+| `hotkeys` — push to talk and mute key through Windows' real key state (F24/F23 pressed with `SendInput`) | PASS (2 runs): gate opened 4.9–5.3 ms after the key went down (10 presses), closed 156–157 ms after release with a 150 ms release delay, 2 of 2 mute-key presses counted. Synthetic key presses, not a physical keyboard or mouse; not tried inside a running game or with an app running as administrator. |
 
 ## 3. Application UI
 
 `Echo.exe --ui-snapshots=<dir>` renders all pages and every setup-wizard step
 into PNG files using a throwaway profile, with real devices running. All 17
-snapshots (including Voice Lab > Noise & echo with live noise suppression and
+snapshots (22 since the Friendly Pop redesign: every screen, the effects editor, Settings sections, all 8 setup
+steps and Home in the dark theme) (including the Voices screen's noise & echo controls with live noise suppression and
 echo cancellation on the real microphone) were reviewed; the app ran with live metering from the real
 microphone, 0 dropouts, ~1 % DSP load, and exited cleanly. Normal launch,
 first-run wizard, autosave, and clean shutdown were also checked by hand.

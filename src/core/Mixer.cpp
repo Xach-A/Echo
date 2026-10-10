@@ -67,7 +67,7 @@ StripRuntime::StripRuntime() {
 
 void StripRuntime::prepare(double sampleRate, int maxBlock) {
     sr_ = sampleRate;
-    for (auto* v : {&l_, &r_, &preL_, &preR_, &postL_, &postR_}) v->assign(maxBlock, 0.0f);
+    for (auto* v : {&l_, &r_, &preL_, &preR_, &postL_, &postR_, &rawL_, &rawR_}) v->assign(maxBlock, 0.0f);
     trimSm_.prepare(sampleRate, 0.02);
     faderSm_.prepare(sampleRate, 0.02);
     panLSm_.prepare(sampleRate, 0.02);
@@ -87,7 +87,7 @@ void StripRuntime::prepare(double sampleRate, int maxBlock) {
 }
 
 void StripRuntime::process(const SourceRuntime* src, const ChainSnap& chain, int n, bool anySolo,
-                           BusAccumulators& acc, const SourceRuntime* reference) {
+                           BusAccumulators& acc, const SourceRuntime* reference, bool talkOpen) {
     float* L = l_.data();
     float* R = r_.data();
     bool mono = true;
@@ -131,6 +131,8 @@ void StripRuntime::process(const SourceRuntime* src, const ChainSnap& chain, int
         }
     }
     inMeter.analyze(L, mono ? L : R, n);
+    std::memcpy(rawL_.data(), L, sizeof(float) * n);
+    std::memcpy(rawR_.data(), mono ? L : R, sizeof(float) * n);
 
     // --- effects ---
     const float* refL = nullptr;
@@ -146,7 +148,8 @@ void StripRuntime::process(const SourceRuntime* src, const ChainSnap& chain, int
 
     // --- fader / pan / mute ---
     const bool muted = mute.load(std::memory_order_relaxed) ||
-                       (anySolo && !solo.load(std::memory_order_relaxed));
+                       (anySolo && !solo.load(std::memory_order_relaxed)) ||
+                       (!talkOpen && talkGated.load(std::memory_order_relaxed));
     muteSm_.setTarget(muted ? 0.0f : 1.0f);
     faderSm_.setTarget(dbToGain(faderDb.load(std::memory_order_relaxed)));
     const float p = clampv(pan.load(std::memory_order_relaxed), -1.0f, 1.0f);
@@ -167,9 +170,13 @@ void StripRuntime::process(const SourceRuntime* src, const ChainSnap& chain, int
     float* pR = preR_.data();
     float* oL = postL_.data();
     float* oR = postR_.data();
+    float* rL = rawL_.data();
+    float* rR = rawR_.data();
     for (int i = 0; i < n; ++i) {
         const float m = muteSm_.next();
         const float f = faderSm_.next() * m;
+        rL[i] *= m;
+        rR[i] *= m;
         pL[i] = L[i] * m;
         pR[i] = R[i] * m;
         oL[i] = L[i] * f * panLSm_.next();

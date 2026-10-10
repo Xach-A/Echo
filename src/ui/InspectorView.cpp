@@ -1,4 +1,5 @@
-// Effects inspector: edit the selected strip's or bus's effect chain.
+// Effects editor: edit the selected input's or output's effect chain (a
+// floating window opened from the Mixer and Voices screens).
 #include <algorithm>
 #include <cmath>
 #include <deque>
@@ -144,9 +145,13 @@ void EchoApp::drawEffectCard(const ChainTarget& t, std::vector<std::shared_ptr<E
     ImGui::PushID(static_cast<int>(fx.instanceId));
     const bool bypassed = fx.bypass.load();
     const bool faulted = fx.faulted.load();
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, p.panelAlt);
-    ImGui::PushStyleColor(ImGuiCol_Border, faulted ? p.bad : bypassed ? p.border : withAlpha(p.accent, 0.6f));
-    ImGui::BeginChild("##card", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, p.surface);
+    ImGui::PushStyleColor(ImGuiCol_Border, faulted ? p.bad : bypassed ? p.lineSoft : p.outline);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14.0f * uiScale());
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f * uiScale(), 12.0f * uiScale()));
+    ImGui::BeginChild("##card", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(); // the card's border colour must not leak into its buttons
     // Header.
     ImGui::TextDisabled(ICON_GRIP);
     if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
@@ -260,25 +265,35 @@ void EchoApp::drawEffectCard(const ChainTarget& t, std::vector<std::shared_ptr<E
         }
     }
     ImGui::EndChild();
-    ImGui::PopStyleColor(2);
+    ImGui::PopStyleColor();
     ImGui::PopID();
 }
 
 void EchoApp::drawInspector() {
-    if (!ImGui::Begin("Effects")) {
-        ImGui::End();
-        return;
-    }
     const Palette& p = pal();
-    if (!hasSelection_) {
-        ImGui::TextWrapped("Select an input strip or output bus in the Mixer to edit its effects chain.");
-        ImGui::End();
+    const float sc = uiScale();
+    if (!hasSelection_ || !mc_->chainFor(selected_)) {
+        hasSelection_ = false;
+        effectsOpen_ = false;
         return;
     }
     const ChainTarget t = selected_;
     std::vector<std::shared_ptr<Effect>>* chain = mc_->chainFor(t);
-    if (!chain) {
-        hasSelection_ = false;
+    std::string title;
+    if (t.bus) title = "Effects \xc2\xb7 " + mc_->session().bus(t.id)->name;
+    else title = "Effects \xc2\xb7 " + mc_->session().strip(t.id)->name;
+    title += "###effects-editor";
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowSize(ImVec2(std::min(820.0f * sc, vp->WorkSize.x * 0.9f), vp->WorkSize.y * 0.86f), ImGuiCond_Appearing);
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + vp->WorkSize.y * 0.5f),
+                            ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, toVec4(p.bg));
+    ImGui::PushStyleColor(ImGuiCol_TitleBg, toVec4(p.surface));
+    ImGui::PushStyleColor(ImGuiCol_TitleBgActive, toVec4(p.surface));
+    ImGui::PushStyleColor(ImGuiCol_Border, toVec4(p.outline));
+    const bool visible = ImGui::Begin(title.c_str(), &effectsOpen_, ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoCollapse);
+    ImGui::PopStyleColor(4);
+    if (!visible) {
         ImGui::End();
         return;
     }
@@ -388,7 +403,6 @@ void EchoApp::drawInspector() {
         ImGui::TextDisabled("Chain latency: %.1f ms", totalLatency * 1000.0 / mc_->engine().sampleRate());
     ImGui::EndChild();
     ImGui::End();
-    if (managePresets_) drawPresetManager();
 }
 
 void EchoApp::drawPresetManager() {
@@ -455,7 +469,7 @@ void EchoApp::drawPresetManager() {
             ImGui::PopID();
         }
         ImGui::EndTable();
-        if (!any) ImGui::TextDisabled("No user presets yet. Use 'Save preset' in the Effects panel.");
+        if (!any) ImGui::TextDisabled("No user presets yet. Use 'Save preset' in the effects editor.");
     }
     std::string err;
     if (action == "rename") {

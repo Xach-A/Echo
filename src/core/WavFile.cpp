@@ -148,4 +148,37 @@ bool readWav(const std::wstring& path, WavData& out, std::string* error) {
     return true;
 }
 
+bool readWavInfo(const std::wstring& path, WavInfo& out) {
+    FILE* f = _wfopen(path.c_str(), L"rb");
+    if (!f) return false;
+    uint8_t head[12];
+    bool ok = std::fread(head, 1, 12, f) == 12 && !std::memcmp(head, "RIFF", 4) && !std::memcmp(head + 8, "WAVE", 4);
+    bool haveFmt = false, haveData = false;
+    while (ok && !(haveFmt && haveData)) {
+        uint8_t ch[8];
+        if (std::fread(ch, 1, 8, f) != 8) break;
+        const uint32_t len = get32(ch + 4);
+        if (!std::memcmp(ch, "fmt ", 4) && len >= 16) {
+            uint8_t body[16];
+            if (std::fread(body, 1, 16, f) != 16) break;
+            out.channels = get16(body + 2);
+            out.sampleRate = static_cast<int>(get32(body + 4));
+            out.bitDepth = get16(body + 14);
+            haveFmt = true;
+            if (_fseeki64(f, static_cast<int64_t>(len) - 16 + (len & 1), SEEK_CUR) != 0) break;
+        } else {
+            if (!std::memcmp(ch, "data", 4)) {
+                out.dataBytes = len;
+                haveData = true;
+            }
+            if (_fseeki64(f, static_cast<int64_t>(len) + (len & 1), SEEK_CUR) != 0) break;
+        }
+    }
+    std::fclose(f);
+    if (!ok || !haveFmt || !haveData || out.channels <= 0 || out.sampleRate <= 0 || out.bitDepth < 8) return false;
+    const double bytesPerSecond = static_cast<double>(out.sampleRate) * out.channels * (out.bitDepth / 8);
+    out.seconds = out.dataBytes / bytesPerSecond;
+    return true;
+}
+
 } // namespace echo

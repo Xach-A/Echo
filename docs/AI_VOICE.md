@@ -32,7 +32,8 @@ Echo includes an optional, separate AI voice module. **Regular voice changing
 
 ## Using it
 
-Voice Lab > AI voice > (ONNX Runtime found) > choose a model > **Use on input**.
+Voices > AI voice (optional) > Set up AI voice > (ONNX Runtime found) > choose a model >
+**Use on input**.
 The effect appears in that input's chain. Controls: Pitch (passed to models
 that support it), Mix, Buffer (fixed latency; raise it if "fallbacks to dry
 voice" keeps growing). Status shows inference time per chunk and the

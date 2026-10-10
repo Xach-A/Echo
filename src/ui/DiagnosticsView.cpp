@@ -43,7 +43,8 @@ std::string EchoApp::diagnosticReport() {
           << s.source.processName << "' status=" << s.status << " fx=" << s.chain.size();
         if (const SourceRuntime* r = mc_->sourceFor(s.id))
             o << " fill=" << r->fillMs.load() << "ms drift=" << r->driftPpm.load() << "ppm under=" << r->underruns.load()
-              << " over=" << r->overruns.load() << " margin=+" << r->marginMs.load() << "ms latency="
+              << " over=" << r->overruns.load() << " gaps=" << r->gaps.load() << " margin=+" << r->marginMs.load()
+              << "ms latency="
               << r->latencySeconds() * 1000.0 << "ms";
         o << "\n";
     }
@@ -71,10 +72,6 @@ std::string EchoApp::diagnosticReport() {
 }
 
 void EchoApp::drawDiagnostics() {
-    if (!ImGui::Begin("Diagnostics")) {
-        ImGui::End();
-        return;
-    }
     const Palette& p = pal();
     Engine& e = mc_->engine();
     EngineStats& st = e.stats();
@@ -121,10 +118,18 @@ void EchoApp::drawDiagnostics() {
                     ImGui::TableNextColumn();
                     if (r) ImGui::Text("%+.0f ppm", r->driftPpm.load());
                     ImGui::TableNextColumn();
-                    if (r) ImGui::Text("%llu", static_cast<unsigned long long>(r->underruns.load()));
+                    if (r) {
+                        ImGui::Text("%llu", static_cast<unsigned long long>(r->underruns.load() + r->gaps.load()));
+                        Tip("Times this input ran dry (for app/loopback captures: only while audio was playing).");
+                    }
                     ImGui::TableNextColumn();
-                    if (r) ImGui::Text("%llu / %llu", static_cast<unsigned long long>(r->overruns.load()),
-                                       static_cast<unsigned long long>(ep ? ep->stats.overruns.load() : 0));
+                    if (r) {
+                        ImGui::Text("%llu / %llu", static_cast<unsigned long long>(r->overruns.load()),
+                                    static_cast<unsigned long long>(
+                                        ep ? ep->stats.overruns.load() + ep->stats.discontinuities.load() : 0));
+                        Tip("Echo dropped a backlog / audio lost before Echo received it (device buffer overflow or a "
+                            "gap Windows reported).");
+                    }
                     ImGui::TableNextColumn();
                     if (r) ImGui::Text("%.1f ms", r->latencySeconds() * 1000.0);
                 }
@@ -206,7 +211,7 @@ void EchoApp::drawDiagnostics() {
             Tip("Writes a plain-text report (settings summary, devices, statistics, recent log). Nothing is sent anywhere.");
             ImGui::SameLine();
             if (ImGui::Button(ICON_COPY " Copy report")) ImGui::SetClipboardText(diagnosticReport().c_str());
-            ImGui::BeginChild("##log", ImVec2(0, 0), ImGuiChildFlags_Borders);
+            ImGui::BeginChild("##log", ImVec2(0, 360.0f * uiScale()), ImGuiChildFlags_Borders);
             ImGui::PushFont(fonts().mono, 0.0f);
             for (const auto& l : log::recent(400)) {
                 const ImU32 c = l.level == log::Level::Error ? p.bad : l.level == log::Level::Warn ? p.warn : p.textDim;
@@ -219,7 +224,6 @@ void EchoApp::drawDiagnostics() {
         }
         ImGui::EndTabBar();
     }
-    ImGui::End();
 }
 
 } // namespace echo::ui

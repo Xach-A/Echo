@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "audio/AppRouting.h"
+#include "audio/HotkeyService.h"
 #include "audio/VirtualCables.h"
 #include "audio/WasapiBackend.h"
 #include "core/Meter.h"
@@ -25,11 +26,19 @@ struct ID3D11Device;
 
 namespace echo::ui {
 
+// Top-level screens (tabs in the header).
+enum class Page { Home = 0, Voices, Mixer, Apps, Devices, Recorder, Settings, Count };
+// Sections of the Settings screen.
+enum class SettingsTab { Audio = 0, Hotkeys, Appearance, Startup, Privacy, Diagnostics, About, Count };
+
 struct Toast {
     std::string text;
     int level = 0; // 0 info, 1 success, 2 warning, 3 error
     double expires = 0.0;
 };
+
+// "Deep Voice", "your own voice" or "your custom effects" for an input.
+std::string voiceLabel(const StripModel& s);
 
 class EchoApp {
 public:
@@ -80,11 +89,32 @@ public:
     }
     bool hasSelection() const { return hasSelection_; }
     ChainTarget selection() const { return selected_; }
+    // Shows a screen or panel by its old window name ("Effects", "Recorder",
+    // "Voice Lab"...): kept so existing callers keep working.
     void focusWindow(const char* name) { focusRequest_ = name; }
+    void navigate(Page p) { page_ = p; }
+    void openSettings(SettingsTab t) {
+        page_ = Page::Settings;
+        settingsTab_ = t;
+    }
+    // Opens the effects editor for a strip or bus.
+    void openEffects(ChainTarget t) {
+        select(t);
+        effectsOpen_ = true;
+    }
 
     // Structural edits requested while iterating strips/buses are deferred
     // to the end of the frame.
     void defer(std::function<void()> fn) { deferred_.push_back(std::move(fn)); }
+
+    // Microphone mute (all microphone inputs), used by the mute hotkey and
+    // the tray menu.
+    bool microphonesMuted() { return mc_ && mc_->microphonesMuted(); }
+    void toggleMicrophoneMute();
+    // Closing the window keeps Echo running in the notification area.
+    bool closeToTray() const { return mc_ && mc_->session().ui.closeToTray; }
+    // Windows switched between light and dark app mode.
+    void onSystemThemeChanged();
 
     // Runs the setup wizard (first run or from the Help menu).
     void openWizard() { wizardOpen_ = true; wizardStep_ = 0; }
@@ -106,20 +136,31 @@ public:
 
     std::string busLabel(const BusModel& b) const; // "A1", "B1" ...
 
+    // The main microphone input (first hardware input) and the first bus of a kind.
+    StripModel* primaryMic();
+    BusModel* firstBus(BusKind kind);
+    // Delay a voice preset adds on top of the input's noise/echo cleanup (ms,
+    // at the engine rate), measured from the effects' own latency.
+    double presetDelayMs(const ChainPreset& p);
+    // Applies a voice preset (nullptr = original voice) to an input.
+    void applyVoice(StripModel& s, const ChainPreset* p);
+
 private:
-    // views (each in its own source file)
-    void drawMenuBar();
-    void drawStatusBar();
-    void drawDockspace();
+    // shell
+    void drawShell();
+    void drawHeader();
+    void handleFocusRequest();
+    // screens (each in its own source file)
+    void drawHome();
     void drawMixer();
-    void drawStrip(StripModel& s, float width, float height);
-    void drawBusStrip(BusModel& b, float width, float height);
-    void drawInspector();
+    void drawStrip(StripModel& s, float width);
+    void drawBusRow(BusModel& b, float width);
+    void drawInspector(); // floating effects editor
     void drawEffectCard(const ChainTarget& t, std::vector<std::shared_ptr<Effect>>& chain, int index);
     void drawPresetManager();
-    void drawRouting();
+    void drawRouting(); // routing table (inside the Mixer)
     void drawFlowDiagram(ImVec2 size);
-    void drawVoiceLab();
+    void drawVoiceLab(); // the Voices screen
     void drawAiPanel(StripModel& strip);
     void drawNoiseEchoPanel(StripModel& strip);
     void drawCleanupStatus(Effect& fx);                       // noise suppressor / echo canceller meters
@@ -128,10 +169,12 @@ private:
     void drawApps();
     void drawDevices();
     void drawRecorder();
-    void drawDiagnostics();
+    void drawDiagnostics(); // Settings > Diagnostics
     void drawSettings();
+    void drawHotkeySettings();
+    void pollHotkeys();
     void drawWizard();
-    void drawAbout();
+    void drawAbout(); // Settings > About
     void drawToasts();
     void updateMeters(double now, double dt);
     void autosave(double now);
@@ -154,7 +197,6 @@ private:
     void snapshotStep();
     std::wstring snapshotDir_, captureRequest_;
     int snapshotIndex_ = -1, snapshotFrame_ = 0;
-    std::string voiceTabRequest_; // Voice Lab tab to bring to front once
     bool managePresets_ = false;
     ChainTarget selected_;
     bool hasSelection_ = false;
@@ -166,10 +208,16 @@ private:
     float dpi_ = 1.0f;
     bool quit_ = false;
     bool safeMode_ = false;
-    bool layoutBuilt_ = false;
-    bool resetLayout_ = false;
-    bool showAbout_ = false;
     bool showDemo_ = false;
+    // navigation
+    Page page_ = Page::Home;
+    SettingsTab settingsTab_ = SettingsTab::Audio;
+    bool effectsOpen_ = false;
+    bool routingOpen_ = false;
+    int voiceCategory_ = 0;
+    uint32_t voiceTarget_ = 0;
+    std::unordered_map<std::string, double> presetDelayCache_;
+    int presetDelayRate_ = 0;
 
     // wizard
     bool wizardOpen_ = false;
@@ -185,9 +233,17 @@ private:
 
     // recorder view state
     std::unordered_map<uint64_t, bool> recordSelection_;
+    std::vector<RecordingFile> recent_;
+    double recentRefreshed_ = -10.0;
+    bool recentWasActive_ = false;
     // diagnostics
     std::vector<float> cpuHistory_;
     int diagStrip_ = 0, diagBus_ = 0;
+    // hotkeys
+    std::unique_ptr<win::HotkeyService> hotkeys_;
+    HotkeySettings appliedHotkeys_;
+    bool hotkeysApplied_ = false;
+    bool openKeyCapture_ = false;
     // engine settings being edited
     EngineSettings pendingEngine_;
     bool pendingEngineInit_ = false;

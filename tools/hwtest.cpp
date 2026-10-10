@@ -20,21 +20,26 @@
 //   echo_hwtest denoise [sec]     capture the default microphone through the engine with noise
 //                                 suppression in the strip chain; reports room-noise reduction,
 //                                 voice activity, CPU and latency. Audio stays in memory only.
+//   echo_hwtest hotkeys           push to talk / mute keys through Windows' real key state:
+//                                 presses F24 and F23 with SendInput (keys no app uses)
 //   echo_hwtest all               run everything above (playback is audible, -40 dBFS)
 #include <windows.h>
 #include <audiopolicy.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <filesystem>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "audio/AppRouting.h"
+#include "audio/HotkeyService.h"
 #include "audio/AppSessions.h"
 #include "audio/DeviceManager.h"
 #include "audio/VirtualCables.h"
@@ -534,6 +539,115 @@ void cmdVirtualMic(DeviceManager& dm) {
     measureChirpLatency("Echo output -> virtual mic recording side", *tone, *mem, 48000.0);
 }
 
+// App capture under load, like capturing Chrome while a game runs: this
+// process plays a tone into the virtual cable (inaudible), captures its own
+// audio with process loopback (as for any app), with the default output as
+// the silent engine clock. Optional busy threads imitate a game's CPU load.
+// Reports gaps in the captured tone and every glitch counter.
+void cmdAppSoak(DeviceManager& dm, int seconds, int loadThreads) {
+    const auto pairs = findCablePairs(dm.devices());
+    const CablePair* pair = nullptr;
+    for (const auto& p : pairs)
+        if (!p.secondary) {
+            pair = &p;
+            break;
+        }
+    const std::string outId = dm.defaultDeviceId(Flow::Render);
+    if (!pair || outId.empty() || !processLoopbackSupported()) {
+        result("app capture under load", 0, "needs a virtual cable, a default output and Windows 10 2004+");
+        return;
+    }
+    std::string err;
+    StreamOptions co;
+    co.deviceId = fromUtf8(pair->renderId);
+    co.label = pair->renderName;
+    auto cable = WasapiRender::open(co, &err);
+    StreamOptions oo;
+    oo.deviceId = fromUtf8(outId);
+    oo.label = "default output (clock, silent)";
+    auto phones = WasapiRender::open(oo, &err);
+    StreamOptions po;
+    po.captureMode = CaptureMode::ProcessLoopback;
+    po.processId = GetCurrentProcessId();
+    po.includeProcessTree = true;
+    po.label = "own process (app capture)";
+    auto app = WasapiCapture::open(po, &err);
+    if (!cable || !phones || !app) {
+        result("app capture under load", -1, "could not open streams: " + err);
+        return;
+    }
+    std::atomic<bool> stopLoad{false};
+    std::vector<std::thread> burners;
+    for (int i = 0; i < loadThreads; ++i)
+        burners.emplace_back([&] {
+            volatile double x = 1.0;
+            while (!stopLoad.load(std::memory_order_relaxed)) x = x * 1.0000001 + 1e-9;
+        });
+    EngineRig rig(48000, 480);
+    auto tone = std::make_shared<ToneSource>();
+    tone->wave = ToneSource::Sine;
+    tone->frequency = 1000.0f;
+    tone->levelDb = -20.0f;
+    const int sTone = rig.addSource(tone);
+    auto appSrc = std::make_shared<DeviceCaptureSource>(app);
+    const int sApp = rig.addSource(appSrc);
+    StripRuntime* toneStrip = rig.addStrip(sTone);
+    StripRuntime* appStrip = rig.addStrip(sApp);
+    auto clockSink = std::make_shared<DeviceRenderSink>(phones);
+    const int kClock = rig.addSink(clockSink);
+    clockSink->setMaster(true, rig.engine.wakeTarget());
+    rig.g->masterSink = kClock;
+    auto cableSink = std::make_shared<DeviceRenderSink>(cable);
+    const int kCable = rig.addSink(cableSink);
+    auto mem = std::make_shared<MemorySink>(size_t(48000) * (seconds + 2));
+    const int kMem = rig.addSink(mem);
+    rig.addBus(kCable);
+    rig.addBus(kMem);
+    toneStrip->sends[0].enabled = true; // tone -> cable (this process's audio)
+    appStrip->sends[1].enabled = true;  // captured app audio -> memory
+    rig.go();
+    std::printf("App capture for %d s with %d busy threads (tone into '%s', inaudible)...\n", seconds, loadThreads,
+                pair->renderName.c_str());
+    std::this_thread::sleep_for(std::chrono::seconds(seconds));
+    rig.engine.stop();
+    stopLoad = true;
+    for (auto& t : burners) t.join();
+    // Silent stretches in the captured tone after it first arrives.
+    const auto& d = mem->leftData();
+    const size_t periods = std::min(d.size(), mem->written()) / 48;
+    int gapCount = 0, gapMs = 0;
+    bool started = false, inGap = false;
+    std::string list;
+    for (size_t k = 0; k < periods; ++k) {
+        double re = 0, im = 0;
+        for (int n = 0; n < 48; ++n) {
+            re += d[k * 48 + n] * std::cos(2 * kPiD * n / 48.0);
+            im -= d[k * 48 + n] * std::sin(2 * kPiD * n / 48.0);
+        }
+        const bool low = 2 * std::sqrt(re * re + im * im) / 48 < 0.05;
+        if (!started) {
+            started = !low;
+            continue;
+        }
+        if (low && !inGap) {
+            ++gapCount;
+            if (list.size() < 100) list += " " + std::to_string(k) + "ms";
+        }
+        gapMs += low;
+        inGap = low;
+    }
+    char buf[600];
+    std::snprintf(buf, sizeof(buf),
+                  "%d s, %d busy threads: %d gaps (%d ms)%s in the captured app audio; app source: underruns %llu, "
+                  "gaps %llu, backlog drops %llu, device overflow %llu, Windows discontinuities %llu, margin +%.0f ms; "
+                  "app capture buffer %d frames",
+                  seconds, loadThreads, gapCount, gapMs, list.c_str(), (unsigned long long)appSrc->underruns.load(),
+                  (unsigned long long)appSrc->gaps.load(), (unsigned long long)appSrc->overruns.load(),
+                  (unsigned long long)app->stats.overruns.load(), (unsigned long long)app->stats.discontinuities.load(),
+                  appSrc->marginMs.load(), app->periodFrames());
+    result("app capture under load", started && gapCount == 0 ? 1 : -1, buf);
+}
+
 // UI-thread work that touches Windows audio: how long one call takes.
 void cmdPerf(DeviceManager& dm) {
     auto time = [](const char* what, int reps, auto fn) {
@@ -980,6 +1094,88 @@ int exportPresets(const std::wstring& dir) {
     return 0;
 }
 
+// Push to talk through GetAsyncKeyState: synthetic F24/F23 presses (no
+// application uses them) must open/close the gate and toggle mute.
+void cmdHotkeys() {
+    std::printf("\n== Hotkeys (push to talk, mute) ==\n");
+    HotkeyService hk;
+    std::atomic<int> gateChanges{0};
+    std::atomic<bool> gate{true};
+    hk.start([&](bool open) {
+        gate = open;
+        ++gateChanges;
+    });
+    HotkeySettings s;
+    s.talkMode = TalkMode::PushToTalk;
+    s.talkKey = {VK_F24, 0};
+    s.muteKey = {VK_F23, 0};
+    s.releaseDelayMs = 150;
+    hk.setSettings(s);
+    auto key = [](WORD vk, bool down) {
+        INPUT in{};
+        in.type = INPUT_KEYBOARD;
+        in.ki.wVk = vk;
+        in.ki.dwFlags = down ? 0 : KEYEVENTF_KEYUP;
+        return SendInput(1, &in, sizeof(in)) == 1;
+    };
+    // Spins (yielding) instead of Sleep(1), whose ~15.6 ms granularity would
+    // swamp the measurement.
+    auto waitFor = [](const std::function<bool()>& cond, double seconds) {
+        const double t0 = monotonicSeconds();
+        while (monotonicSeconds() - t0 < seconds) {
+            if (cond()) return monotonicSeconds() - t0;
+            std::this_thread::yield();
+        }
+        return -1.0;
+    };
+    const double closed = waitFor([&] { return !gate.load(); }, 0.5);
+    result("push to talk starts closed", closed >= 0 ? 1 : -1, closed >= 0 ? "microphone gate closed" : "gate stayed open");
+    if (!key(VK_F24, true)) {
+        result("push to talk key", 0, "SendInput was blocked (another program has priority), not tested");
+        hk.stop();
+        return;
+    }
+    double opened = waitFor([&] { return gate.load(); }, 0.5);
+    key(VK_F24, false);
+    char buf[160];
+    // A few more presses for a typical figure.
+    double worst = opened;
+    int opens = opened >= 0 ? 1 : 0;
+    for (int i = 0; i < 9 && opened >= 0; ++i) {
+        waitFor([&] { return !gate.load(); }, 1.0);
+        Sleep(7 * (i + 1) % 13); // land at different points of the 5 ms poll
+        key(VK_F24, true);
+        const double t = waitFor([&] { return gate.load(); }, 0.5);
+        key(VK_F24, false);
+        if (t >= 0) ++opens;
+        worst = std::max(worst, t);
+    }
+    std::snprintf(buf, sizeof(buf), "gate opened %.1f ms after the first key press; slowest of %d presses %.1f ms",
+                  opened * 1000.0, opens, worst * 1000.0);
+    result("push to talk opens", opened >= 0 && opens == 10 && worst < 0.05 ? 1 : -1, opened >= 0 ? buf : "gate did not open");
+    const double reclosed = waitFor([&] { return !gate.load(); }, 1.0);
+    std::snprintf(buf, sizeof(buf), "closed %.0f ms after release (release delay 150 ms)", reclosed * 1000.0);
+    result("push to talk release delay", reclosed >= 0.12 && reclosed < 0.25 ? 1 : -1, reclosed >= 0 ? buf : "gate stayed open");
+
+    key(VK_F23, true);
+    Sleep(30);
+    key(VK_F23, false);
+    Sleep(30);
+    key(VK_F23, true);
+    Sleep(30);
+    key(VK_F23, false);
+    Sleep(30);
+    const int toggles = hk.takeMuteToggles();
+    std::snprintf(buf, sizeof(buf), "%d presses counted (expected 2)", toggles);
+    result("mute key presses", toggles == 2 ? 1 : -1, buf);
+
+    s.talkMode = TalkMode::Off;
+    hk.setSettings(s);
+    const double reopened = waitFor([&] { return gate.load(); }, 0.5);
+    result("push to talk off opens the microphone", reopened >= 0 ? 1 : -1, reopened >= 0 ? "gate open" : "gate stayed closed");
+    hk.stop();
+}
+
 int wmain(int argc, wchar_t** argv) {
     SetConsoleOutputCP(CP_UTF8);
     if (argc > 2 && std::wstring(argv[1]) == L"export-presets") return exportPresets(argv[2]);
@@ -1003,9 +1199,11 @@ int wmain(int argc, wchar_t** argv) {
     if (cmd == L"sysaudio" || cmd == L"all") cmdSysAudio(dm);
     if (cmd == L"approute") cmdAppRoute(dm);
     if (cmd == L"perf") cmdPerf(dm);
+    if (cmd == L"appsoak") cmdAppSoak(dm, argc > 2 ? _wtoi(argv[2]) : 60, argc > 3 ? _wtoi(argv[3]) : 0);
     if (cmd == L"cableraw") cmdCableRaw(dm, argc > 2 ? _wtoi(argv[2]) : 15, argc > 3 ? _wtof(argv[3]) : 40.0);
     if (cmd == L"soak") cmdSoak(dm, argc > 2 ? _wtof(argv[2]) : 60.0);
     if (cmd == L"denoise") cmdDenoise(dm, argc > 2 ? _wtof(argv[2]) : 10.0);
+    if (cmd == L"hotkeys") cmdHotkeys();
     std::printf("\nSummary: %d passed, %d failed, %d skipped\n", g_pass, g_fail, g_skip);
     return g_fail ? 1 : 0;
 }

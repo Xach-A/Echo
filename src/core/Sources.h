@@ -38,6 +38,9 @@ public:
     std::atomic<int> state{static_cast<int>(SourceState::Offline)};
     std::atomic<uint64_t> underruns{0};
     std::atomic<uint64_t> overruns{0};
+    // App/loopback captures (which are silent when nothing plays): ran dry
+    // while audio was actually playing (an audible gap).
+    std::atomic<uint64_t> gaps{0};
     std::atomic<float> fillMs{0.0f};
     std::atomic<float> driftPpm{0.0f};
     std::atomic<float> marginMs{0.0f}; // adaptive extra buffering after dropouts

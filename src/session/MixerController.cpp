@@ -123,6 +123,7 @@ void MixerController::update(double now) {
     // Health check twice a second: dead streams, retries, vanished apps.
     if (now - lastHealthCheck_ >= 0.5) {
         lastHealthCheck_ = now;
+        logGlitches();
         for (auto& [key, e] : sources_) {
             if (e.endpoint && endpointDead(e.endpoint->status())) {
                 ECHO_LOG_WARN("Input '%s' stopped (%s); will reconnect", e.ref.deviceName.c_str(),
@@ -358,6 +359,43 @@ bool MixerController::finishPendingOpens() {
     return changed;
 }
 
+void MixerController::logGlitches() {
+    auto report = [](uint64_t* seen, const uint64_t* now, const char* const* names, int count, const std::string& what,
+                     float marginMs) {
+        std::string msg;
+        for (int i = 0; i < count; ++i) {
+            if (now[i] > seen[i]) {
+                if (!msg.empty()) msg += ", ";
+                msg += names[i] + std::string(" +") + std::to_string(now[i] - seen[i]);
+            }
+            seen[i] = now[i];
+        }
+        if (!msg.empty())
+            ECHO_LOG_WARN("Audio glitch: %s: %s (extra margin now %.0f ms)", what.c_str(), msg.c_str(), marginMs);
+    };
+    static const char* const kIn[] = {"engine underrun", "backlog drop", "gap while playing", "device overflow",
+                                      "Windows discontinuity"};
+    for (auto& [key, e] : sources_) {
+        if (!e.runtime || !e.endpoint) continue;
+        const SourceRuntime& r = *e.runtime;
+        const uint64_t now[5] = {r.underruns.load(), r.overruns.load(), r.gaps.load(), e.endpoint->stats.overruns.load(),
+                                 e.endpoint->stats.discontinuities.load()};
+        report(e.seen, now, kIn, 5, "input '" + e.endpoint->describe() + "'", r.marginMs.load());
+    }
+    static const char* const kOut[] = {"ran dry", "overflow", "device underrun", "Windows discontinuity"};
+    for (auto& [key, e] : sinks_) {
+        if (!e.runtime || !e.endpoint) continue;
+        const SinkRuntime& k = *e.runtime;
+        const uint64_t now[4] = {k.underruns.load(), k.overruns.load(), e.endpoint->stats.underruns.load(),
+                                 e.endpoint->stats.discontinuities.load()};
+        report(e.seen, now, kOut, 4, "output '" + e.endpoint->describe() + "'", k.marginMs.load());
+    }
+    static const char* const kEng[] = {"late blocks (timer clock)", "clock device stalled", "exceptions"};
+    const EngineStats& es = engine_.stats();
+    const uint64_t now[3] = {es.lateBlocks.load(), es.deviceStalls.load(), es.exceptions.load()};
+    report(seenEngine_, now, kEng, 3, "engine", 0.0f);
+}
+
 bool MixerController::followDefaultDevices() {
     bool moved = false;
     auto release = [&](auto& e, const char* what) {
@@ -430,6 +468,8 @@ void MixerController::rebuildGraph() {
         }
         // ProcessLoopback may have resolved a new PID: remember it.
         if (e && s.source.kind == SourceKind::ProcessLoopback) s.source.processId = e->ref.processId;
+        // Push to talk and the mute hotkey act on microphones only.
+        s.rt->talkGated = isMicrophoneSource(s.source);
         // Reference (e.g. playback loopback for echo cancellation): only
         // opened when an effect on this strip uses it.
         int refIdx = -1;
@@ -866,6 +906,26 @@ bool MixerController::isMicrophoneSource(const SourceRef& src) const {
         if (src.deviceId.empty() ? d.isDefault : d.id == src.deviceId) return !d.isCable;
     }
     return true; // unknown/unplugged device: treat as a microphone
+}
+
+std::vector<StripModel*> MixerController::microphoneStrips() {
+    std::vector<StripModel*> out;
+    for (auto& s : session_.strips)
+        if (isMicrophoneSource(s.source)) out.push_back(&s);
+    return out;
+}
+
+bool MixerController::microphonesMuted() {
+    const auto mics = microphoneStrips();
+    if (mics.empty()) return false;
+    for (const StripModel* s : mics)
+        if (!s->rt->mute.load()) return false;
+    return true;
+}
+
+void MixerController::setMicrophonesMuted(bool muted) {
+    for (StripModel* s : microphoneStrips()) s->rt->mute = muted;
+    markDirty();
 }
 
 bool MixerController::addDefaultNoiseSuppression(StripModel& s) {

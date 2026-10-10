@@ -103,7 +103,7 @@ Legend
 | Independent per microphone | Tested (each input/channel has its own network state) |
 | Real microphone | HW-verified (Blue Snowball, quiet room with background voices): room noise −56 → −68 dBFS, 1–1.4 % CPU |
 | Echo cancellation (speakers instead of headphones) | Tested with simulated room echo (35 ms delay + 120 ms tail): −42 dB after convergence standalone, −45 dB through the whole engine with the playback loopback as reference; double talk keeps the near-end voice (correlation 0.92, level −0.8 dB); transparent without a reference. Not yet verified with real speakers and room acoustics. |
-| Reference device selection, status (reference connected, echo reduction, double talk) | Implemented (Voice Lab > Noise & echo, Effects inspector) |
+| Reference device selection, status (reference connected, echo reduction, double talk) | Implemented (Voices > Noise & echo, effects editor) |
 
 Default chain order on a microphone: echo cancellation → noise suppression →
 gate/EQ/compression → voice transformation. Effects can be reordered freely.
@@ -144,6 +144,8 @@ gate/EQ/compression → voice transformation. Effects can be reordered freely.
 |---|---|
 | Record any strips (pre/post fader) and buses to WAV, 16/24-bit PCM or 32-bit float, resampled rates | Tested (files read back: format, rate, level and pitch verified for 16/24/32-bit and 48→44.1 kHz; UI flow not automated) |
 | Background writer thread, crash-safe headers, duration/size/dropped indicators | Implemented |
+| Record an input without its effects (e.g. your natural voice next to the changed one) | Tested (tap level measured before a +6 dB effect) |
+| Recent recordings list (length from the WAV header, open in the default player, show in folder) | Tested (listing, order, header lengths) / Implemented (UI) |
 | Test tone generator (sine, square, noise, pink, sweep, impulses, chirps) | Tested / HW-verified |
 | Pre/post-fader monitoring via sends | Tested |
 
@@ -151,12 +153,15 @@ gate/EQ/compression → voice transformation. Effects can be reordered freely.
 
 | Feature | Status |
 |---|---|
-| Dark/midnight/light themes, per-monitor DPI, UI scale, dockable re-arrangeable panels | Implemented (snapshots reviewed) |
+| "Friendly Pop" interface: Home, Voices, Mixer, Apps, Devices, Recorder and Settings screens, floating effects editor; light and dark themes, per-monitor DPI, interface size | Implemented (snapshots of every screen and setup step reviewed, light and dark) |
 | First-run setup wizard (8 steps) | Implemented (snapshots reviewed) |
 | Persistence (autosave, atomic writes, backup recovery), import/export | Tested |
 | Presets: 32 factory + user save/rename/duplicate/delete/import/export | Tested |
 | Safe mode after crash, crash dumps, logs, diagnostic report | Implemented |
 | Start with Windows (per user), single instance | Implemented |
+| Push to talk / push to mute (hold a key or mouse button; release delay) and a mute key, working while other apps are in front | Tested (key logic, capture of a new key, engine gate silences microphones only) + HW-verified with synthetic key presses (`echo_hwtest hotkeys`: gate opens ≤ 5.3 ms after the key goes down). Not yet tried with a physical key inside a game, or with apps running as administrator. Keys are read with GetAsyncKeyState polling (no keyboard hook); they still reach the app in front. |
+| Keep running in the notification area when the window is closed (Open / Mute microphone / Quit menu) | Implemented |
+| Accent colour, "Match Windows" theme | Implemented |
 | Keyboard shortcuts (Ctrl+S, Ctrl+R, Ctrl+B, F1), tooltips | Implemented |
 | Screen-reader accessibility | Partial — Dear ImGui has no UI Automation support; keyboard navigation works. |
 | Installer (per user, no admin) + portable ZIP | See `TESTING.md` |

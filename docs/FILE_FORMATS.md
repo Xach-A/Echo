@@ -30,7 +30,7 @@ clamped to each parameter's range.
 
 Factory presets are listed in `presets/` (exported from the built-in set).
 User presets live in `%APPDATA%\Echo\presets\`; copy files there to import,
-copy them out to export (or use the Effects panel's preset manager).
+copy them out to export (or use the effects editor's preset manager).
 
 ## Session (`%APPDATA%\Echo\session.json`)
 
@@ -81,7 +81,7 @@ copy them out to export (or use the Effects panel's preset manager).
 
 Saving is atomic (`session.json.tmp` → `session.json`, previous version kept
 as `session.json.bak`, which is loaded automatically if the main file is
-corrupt). File > Export/Import session uses the same format.
+corrupt). Settings > Startup & data > Export/Import settings uses the same format.
 
 ## Voice model manifest
 

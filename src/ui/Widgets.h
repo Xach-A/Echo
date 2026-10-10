@@ -51,6 +51,9 @@ void setTooltipsEnabled(bool on);
 // Help marker "(?)" with tooltip.
 void HelpMarker(const char* text);
 
+// Icon glyph for a voice preset name ("" = the original voice).
+const char* presetIcon(const std::string& name);
+
 // Text that is truncated with an ellipsis to fit a width.
 void TextEllipsis(const std::string& s, float width, ImU32 color = 0);
 

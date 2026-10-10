@@ -13,6 +13,7 @@
 #include "core/Resampler.h"
 #include "dsp/Effect.h"
 #include "session/DeviceBackend.h"
+#include "session/Hotkeys.h"
 
 namespace echo {
 
@@ -51,6 +52,9 @@ struct StripModel {
     SourceRef reference;
     std::shared_ptr<StripRuntime> rt = std::make_shared<StripRuntime>();
     std::vector<std::shared_ptr<Effect>> chain;
+    // Name of the voice preset last applied to this input ("" = original
+    // voice). Shown in the UI; the chain itself is the source of truth.
+    std::string voice;
 
     // Runtime status (not persisted).
     std::string status;
@@ -96,13 +100,15 @@ struct RecorderSettings {
 };
 
 struct UiSettings {
-    int theme = 0;           // 0 dark, 1 darker, 2 light
+    int theme = 0;           // 0 light, 1 dark, 2 match Windows (light or dark)
     float uiScale = 1.0f;    // multiplier on top of DPI scale
     int windowX = -1, windowY = -1, windowW = 1480, windowH = 900;
     bool maximized = false;
     bool showTooltips = true;
     bool compactStrips = false;
-    std::string accent = "blue";
+    std::string accent = "coral"; // coral, blue, green, violet
+    // Closing the window keeps Echo running in the notification area.
+    bool closeToTray = false;
 };
 
 // Version 2: noise suppression became a default part of microphone inputs.
@@ -116,6 +122,7 @@ struct Session {
     EngineSettings engine;
     RecorderSettings recorder;
     UiSettings ui;
+    HotkeySettings hotkeys;
     bool firstRunCompleted = false;
     // Add noise suppression to newly added microphone inputs (users can still
     // remove it from any input; this only affects new ones).

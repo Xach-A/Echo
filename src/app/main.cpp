@@ -44,6 +44,70 @@ echo::ui::EchoApp* g_app = nullptr;
 bool g_resumePending = false;
 double g_resumeAt = 0.0;
 
+// ---- notification-area (tray) icon: only while "keep running when closed" is on ----
+constexpr UINT WM_ECHO_TRAY = WM_APP + 1;
+constexpr UINT kTrayOpen = 1, kTrayMute = 2, kTrayQuit = 3;
+UINT g_taskbarCreated = 0;
+bool g_trayAdded = false;
+bool g_trayNoticeShown = false;
+
+void trayAdd(HWND hwnd) {
+    NOTIFYICONDATAW nid{sizeof(nid)};
+    nid.hWnd = hwnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
+    nid.uCallbackMessage = WM_ECHO_TRAY;
+    nid.hIcon = static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                              GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0));
+    wcsncpy_s(nid.szTip, ECHO_APP_NAME_W, _TRUNCATE);
+    g_trayAdded = Shell_NotifyIconW(NIM_ADD, &nid) != FALSE;
+    nid.uVersion = NOTIFYICON_VERSION_4;
+    if (g_trayAdded) Shell_NotifyIconW(NIM_SETVERSION, &nid);
+}
+
+void trayRemove(HWND hwnd) {
+    if (!g_trayAdded) return;
+    NOTIFYICONDATAW nid{sizeof(nid)};
+    nid.hWnd = hwnd;
+    nid.uID = 1;
+    Shell_NotifyIconW(NIM_DELETE, &nid);
+    g_trayAdded = false;
+}
+
+void trayNotice(HWND hwnd) {
+    if (!g_trayAdded || g_trayNoticeShown) return;
+    g_trayNoticeShown = true;
+    NOTIFYICONDATAW nid{sizeof(nid)};
+    nid.hWnd = hwnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_INFO;
+    nid.dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
+    wcsncpy_s(nid.szInfoTitle, ECHO_APP_NAME_W L" is still running", _TRUNCATE);
+    wcsncpy_s(nid.szInfo, L"Your microphone, voice and hotkeys keep working. Right-click the icon to quit.", _TRUNCATE);
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+void showMainWindow(HWND hwnd) {
+    ShowWindow(hwnd, IsIconic(hwnd) ? SW_RESTORE : SW_SHOW);
+    SetForegroundWindow(hwnd);
+}
+
+void trayMenu(HWND hwnd, int x, int y) {
+    HMENU m = CreatePopupMenu();
+    AppendMenuW(m, MF_STRING, kTrayOpen, L"Open " ECHO_APP_NAME_W);
+    AppendMenuW(m, MF_STRING | (g_app && g_app->microphonesMuted() ? MF_CHECKED : 0), kTrayMute, L"Mute microphone");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_STRING, kTrayQuit, L"Quit " ECHO_APP_NAME_W);
+    SetMenuDefaultItem(m, kTrayOpen, FALSE);
+    SetForegroundWindow(hwnd); // required for the menu to close when clicking elsewhere
+    const UINT cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, x, y, 0, hwnd, nullptr);
+    PostMessageW(hwnd, WM_NULL, 0, 0);
+    DestroyMenu(m);
+    if (cmd == kTrayOpen) showMainWindow(hwnd);
+    else if (cmd == kTrayMute && g_app) g_app->toggleMicrophoneMute();
+    else if (cmd == kTrayQuit && g_app) g_app->requestQuit();
+}
+
 void createRenderTarget() {
     ID3D11Texture2D* back = nullptr;
     if (SUCCEEDED(g_swapChain->GetBuffer(0, IID_PPV_ARGS(&back)))) {
@@ -210,11 +274,42 @@ LRESULT WINAPI wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if ((wParam & 0xfff0) == SC_KEYMENU) return 0; // no ALT application menu
         break;
     case WM_CLOSE:
+        if (g_app && g_app->closeToTray()) {
+            if (!g_trayAdded) trayAdd(hwnd);
+            if (g_trayAdded) {
+                ShowWindow(hwnd, SW_HIDE);
+                trayNotice(hwnd);
+                return 0;
+            }
+        }
         if (g_app) g_app->requestQuit();
         return 0;
+    case WM_ECHO_TRAY:
+        switch (LOWORD(lParam)) {
+        case NIN_SELECT:
+        case NIN_KEYSELECT:
+        case WM_LBUTTONDBLCLK:
+            showMainWindow(hwnd);
+            break;
+        case WM_CONTEXTMENU:
+            trayMenu(hwnd, static_cast<short>(LOWORD(wParam)), static_cast<short>(HIWORD(wParam)));
+            break;
+        default:
+            break;
+        }
+        return 0;
+    case WM_SETTINGCHANGE:
+        if (lParam && g_app && wcscmp(reinterpret_cast<const wchar_t*>(lParam), L"ImmersiveColorSet") == 0)
+            g_app->onSystemThemeChanged();
+        break;
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
+    }
+    if (msg == g_taskbarCreated && g_trayAdded) {
+        // Explorer restarted: the icon has to be added again.
+        g_trayAdded = false;
+        trayAdd(hwnd);
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
@@ -239,10 +334,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int showCmd)
     // Single instance: bring the existing window to the front instead.
     HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\EchoMixer.SingleInstance." ECHO_APP_ID_W);
     if (GetLastError() == ERROR_ALREADY_EXISTS && snapshotDir.empty()) {
-        if (HWND other = FindWindowW(kWindowClass, nullptr)) {
-            ShowWindow(other, SW_RESTORE);
-            SetForegroundWindow(other);
-        }
+        if (HWND other = FindWindowW(kWindowClass, nullptr)) showMainWindow(other); // also when in the tray
         return 0;
     }
 
@@ -277,6 +369,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int showCmd)
     // Window placement from the saved session.
     int wx = CW_USEDEFAULT, wy = CW_USEDEFAULT, ww = static_cast<int>(1480 * dpi), wh = static_cast<int>(900 * dpi);
     bool maximized = false;
+    bool closeToTray = false;
     {
         echo::json j;
         if (echo::loadJsonFile(echo::paths::sessionFile(), j, nullptr) && j.contains("ui")) {
@@ -293,8 +386,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int showCmd)
                 wy = y;
             }
             maximized = u.value("maximized", false);
+            closeToTray = u.value("closeToTray", false);
         }
     }
+    g_taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
 
     WNDCLASSEXW wc{sizeof(wc)};
     wc.style = CS_CLASSDC;
@@ -317,9 +412,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int showCmd)
                     MB_ICONERROR);
         return 1;
     }
-    ShowWindow(hwnd, startMinimized || showCmd == SW_SHOWMINIMIZED ? SW_SHOWMINIMIZED
-                     : maximized                                    ? SW_SHOWMAXIMIZED
-                                                                    : SW_SHOWNORMAL);
+    if (startMinimized && closeToTray && snapshotDir.empty()) {
+        // Started with Windows and set to live in the tray: no window yet.
+        trayAdd(hwnd);
+        if (!g_trayAdded) ShowWindow(hwnd, SW_SHOWMINIMIZED);
+    } else {
+        ShowWindow(hwnd, startMinimized || showCmd == SW_SHOWMINIMIZED ? SW_SHOWMINIMIZED
+                         : maximized                                    ? SW_SHOWMAXIMIZED
+                                                                        : SW_SHOWNORMAL);
+    }
     UpdateWindow(hwnd);
 
     IMGUI_CHECKVERSION();
@@ -372,7 +473,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int showCmd)
             g_resumePending = false;
             app.onResume();
         }
-        if (IsIconic(hwnd) || (g_occluded && g_swapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED)) {
+        // The tray icon exists while "keep running when closed" is on.
+        if (app.closeToTray() && !g_trayAdded) trayAdd(hwnd);
+        else if (!app.closeToTray() && g_trayAdded && IsWindowVisible(hwnd)) trayRemove(hwnd);
+        if (!IsWindowVisible(hwnd) || IsIconic(hwnd) ||
+            (g_occluded && g_swapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED)) {
             // Not visible: keep device monitoring and autosave alive, skip drawing.
             app.idle(now);
             Sleep(30);
@@ -395,7 +500,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int showCmd)
                 LARGE_INTEGER due;
                 due.QuadPart = -static_cast<LONGLONG>((nextFrame - t) * 1e7);
                 SetWaitableTimer(frameTimer, &due, 0, nullptr, nullptr, FALSE);
-                MsgWaitForMultipleObjects(1, &frameTimer, FALSE, 100, QS_ALLINPUT);
+                const DWORD w = MsgWaitForMultipleObjects(1, &frameTimer, FALSE, 100, QS_ALLINPUT);
+                // Woken by input before this frame's slot: handle the message
+                // (back to the pump) and keep waiting, instead of drawing early.
+                if (w == WAIT_OBJECT_0 + 1 && nowSeconds() < nextFrame - 0.0005) continue;
             }
             nextFrame = std::max(nextFrame + interval, nowSeconds());
         }
@@ -439,6 +547,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int showCmd)
     }
 
     if (frameTimer) CloseHandle(frameTimer);
+    trayRemove(hwnd);
 
     // Persist window placement.
     WINDOWPLACEMENT wp{sizeof(wp)};

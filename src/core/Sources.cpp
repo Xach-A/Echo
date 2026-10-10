@@ -142,6 +142,13 @@ void DeviceCaptureSource::pull(int frames) {
             underruns.fetch_add(1, std::memory_order_relaxed);
             margin_.onDropout();
             applyTarget();
+        } else if (stamped && ep_->flowClockNow() - st.time < 0.05) {
+            // A loopback/app capture normally runs dry only when nothing
+            // plays. Packets arrived moments ago, so this is a gap in audio
+            // that is playing: count it and widen the margin like a dropout.
+            gaps.fetch_add(1, std::memory_order_relaxed);
+            margin_.onDropout();
+            applyTarget();
         }
         primed_ = false; // re-prime to rebuild the safety margin
     } else if (margin_.onCleanBlock()) {

@@ -1,10 +1,14 @@
 #include "core/Recorder.h"
 
+#include <windows.h>
+
+#include <algorithm>
 #include <chrono>
 #include <ctime>
 #include <filesystem>
 
 #include "core/Log.h"
+#include "core/Text.h"
 
 namespace echo {
 
@@ -25,6 +29,32 @@ std::wstring sanitize(std::wstring s) {
 }
 
 } // namespace
+
+std::vector<RecordingFile> listRecordings(const std::wstring& folder, size_t maxCount) {
+    std::vector<RecordingFile> out;
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        std::wstring ext = it->path().extension().wstring();
+        for (auto& c : ext) c = static_cast<wchar_t>(towlower(c));
+        if (ext != L".wav") continue;
+        RecordingFile r;
+        r.path = it->path().wstring();
+        r.name = wideToUtf8(it->path().filename().wstring());
+        WIN32_FILE_ATTRIBUTE_DATA a{};
+        if (GetFileAttributesExW(r.path.c_str(), GetFileExInfoStandard, &a)) {
+            const uint64_t t = (static_cast<uint64_t>(a.ftLastWriteTime.dwHighDateTime) << 32) | a.ftLastWriteTime.dwLowDateTime;
+            r.modified = static_cast<int64_t>((t - 116444736000000000ull) / 10000000ull);
+            r.bytes = (static_cast<uint64_t>(a.nFileSizeHigh) << 32) | a.nFileSizeLow;
+        }
+        WavInfo info;
+        if (readWavInfo(r.path, info)) r.seconds = info.seconds;
+        out.push_back(std::move(r));
+    }
+    std::sort(out.begin(), out.end(), [](const RecordingFile& a, const RecordingFile& b) { return a.modified > b.modified; });
+    if (out.size() > maxCount) out.resize(maxCount);
+    return out;
+}
 
 Recorder::~Recorder() { stop(); }
 

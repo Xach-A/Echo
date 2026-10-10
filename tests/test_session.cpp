@@ -189,6 +189,14 @@ TEST_CASE("app capture: process loopback strip resolves the process by name") {
     w.mc->start(false);
     CHECK(w.mc->session().strip(id)->online);
     CHECK(w.mc->session().strip(id)->source.processId == 4242);
+    // Learning the process ID must not reopen the capture (it caused a gap).
+    const int opens = w.backend.openCaptureCalls;
+    for (int i = 0; i < 6; ++i) {
+        w.mc->rebuildGraph();
+        w.mc->update(1.0 + i);
+    }
+    CHECK(w.backend.openCaptureCalls == opens);
+    CHECK(w.mc->session().strip(id)->online);
     w.mc->stop();
 }
 

@@ -38,4 +38,15 @@ struct WavData {
 
 bool readWav(const std::wstring& path, WavData& out, std::string* error = nullptr);
 
+// Format and length from the header only (cheap; for file lists). A file
+// still being written reports what its header says so far.
+struct WavInfo {
+    int sampleRate = 0;
+    int channels = 0;
+    int bitDepth = 0;
+    uint64_t dataBytes = 0;
+    double seconds = 0.0;
+};
+bool readWavInfo(const std::wstring& path, WavInfo& out);
+
 } // namespace echo
