@@ -16,10 +16,9 @@
 namespace echo::ui {
 
 namespace {
-constexpr int kSteps = 8;
-const char* kStepTitles[kSteps] = {"Welcome",          "Microphone",        "Headphones",       "Audio settings",
-                                   "Virtual microphone", "Test your voice", "Routing",          "Use it in an app"};
-int g_scene = 0;
+constexpr int kSteps = 7;
+const char* kStepTitles[kSteps] = {"Welcome",          "Microphone",      "Headphones",         "Audio settings",
+                                   "Virtual microphone", "Test your voice", "Use it in your apps"};
 bool g_toneOn = false;
 } // namespace
 
@@ -51,7 +50,7 @@ void EchoApp::drawWizard() {
     }
     // Step indicator: a bar and a numbered dot per step.
     {
-        const char* shortNames[kSteps] = {"Welcome", "Microphone", "Headphones", "Audio", "Virtual mic", "Test", "Routing", "Use it"};
+        const char* shortNames[kSteps] = {"Welcome", "Microphone", "Headphones", "Audio", "Virtual mic", "Test", "Use it"};
         const float w = ImGui::GetContentRegionAvail().x, gap = 6.0f * sc;
         const float colW = (w - gap * (kSteps - 1)) / kSteps;
         const ImVec2 o = ImGui::GetCursorScreenPos();
@@ -97,16 +96,26 @@ void EchoApp::drawWizard() {
             if (b.kind == k) return &b;
         return nullptr;
     };
+    // The name apps show for the virtual mic ("CABLE Output (VB-Audio Virtual Cable)").
+    auto virtualMicName = [&]() -> std::string {
+        const BusModel* vb = busOfKind(BusKind::Virtual);
+        for (const auto& c : backend_->cablePairs())
+            if (vb && c.renderId == vb->output.deviceId) return c.captureName;
+        for (const auto& c : backend_->cablePairs())
+            if (!c.secondary) return c.captureName;
+        return "CABLE Output (VB-Audio Virtual Cable)";
+    };
 
     switch (wizardStep_) {
     case 0:
         ImGui::TextWrapped("Echo is a free virtual audio mixer and voice changer. In a few steps you will:");
         ImGui::BulletText("choose your microphone and headphones,");
-        ImGui::BulletText("set up a virtual microphone that Discord, OBS, games and browsers can use,");
+        ImGui::BulletText("set up a virtual microphone for Discord, Roblox, OBS and other apps,");
         ImGui::BulletText("check that your voice reaches it.");
         ImGui::Spacing();
-        ImGui::TextWrapped("Echo never changes your Windows default devices, needs no account and works offline. You "
-                           "can run it again from Settings > Startup & data, or with F1.");
+        ImGui::TextWrapped("Keep Windows' sound settings as they are: Echo never changes your default devices. It needs "
+                           "no account and works offline. Run this guide again any time from Settings > Startup & data, "
+                           "or with F1.");
         break;
     case 1: {
         StripModel* mic = micStrip();
@@ -153,7 +162,7 @@ void EchoApp::drawWizard() {
             mc_->addBus(BusKind::Physical, OutputRef{}, "Headphones");
             a = busOfKind(BusKind::Physical);
         }
-        ImGui::TextWrapped("Where do you listen? (Used for monitoring and for apps you route to your headphones.)");
+        ImGui::TextWrapped("Where do you listen? (Used for hearing yourself and for apps you route to your headphones.)");
         for (const auto& d : backend_->devices()) {
             if (!d.render || !d.active || d.isCable) continue;
             const bool sel = a && a->output.deviceId == d.id;
@@ -213,9 +222,11 @@ void EchoApp::drawWizard() {
         ImGui::NewLine();
         const int blocks[] = {128, 256, 480, 1024};
         for (int b : blocks) {
-            char lbl[48];
-            std::snprintf(lbl, sizeof(lbl), "%d samples (%.1f ms)%s", b, b * 1000.0 / s.engine.sampleRate, b == 480 ? "  recommended" : "");
-            if (ImGui::RadioButton(lbl, s.engine.blockSize == b) && s.engine.blockSize != b) {
+            ImGui::PushID(b);
+            const std::string lbl = bufferSizeName(b, s.engine.sampleRate);
+            const bool picked = ImGui::RadioButton(lbl.c_str(), s.engine.blockSize == b);
+            ImGui::PopID();
+            if (picked && s.engine.blockSize != b) {
                 s.engine.blockSize = b;
                 pendingEngineInit_ = false;
                 mc_->restart();
@@ -227,24 +238,20 @@ void EchoApp::drawWizard() {
     case 4: {
         const auto& pairs = backend_->cablePairs();
         BusModel* vb = busOfKind(BusKind::Virtual);
-        if (pairs.empty()) {
-            ImGui::TextColored(toVec4(p.warn), ICON_WARNING " No virtual audio cable driver is installed.");
-            ImGui::TextWrapped("A virtual microphone that other apps can select needs a virtual audio cable driver. "
-                               "Windows cannot create one from a normal app. Install a free driver such as VB-CABLE "
-                               "from its official site (administrator approval and a reboot may be required), then "
-                               "come back and press Rescan. You can also skip this and use Echo for monitoring, "
-                               "recording and app routing.");
-            if (ImGui::Button(ICON_OPEN " Open vb-audio.com/Cable"))
-                ShellExecuteW(nullptr, L"open", L"https://vb-audio.com/Cable/", nullptr, nullptr, SW_SHOWNORMAL);
-            ImGui::SameLine();
-            if (ImGui::Button(ICON_REFRESH " Rescan")) mc_->rescanDevices();
+        if (pairs.empty() || snapshotNoCable_) {
+            ImGui::TextWrapped("Apps hear Echo through a virtual microphone. Windows doesn't have one built in, so Echo "
+                               "uses VB-CABLE, a free virtual audio cable from VB-Audio.");
+            ImGui::Spacing();
+            drawVbCableInstall();
+            ImGui::Spacing();
+            pop::Hint("You can also skip this for now: Echo still works for hearing yourself and recording.");
         } else {
             if (!vb) {
                 mc_->addBus(BusKind::Virtual, OutputRef{}, "Virtual Mic");
                 vb = busOfKind(BusKind::Virtual);
             }
-            ImGui::TextWrapped("Choose the cable that becomes your virtual microphone. Echo plays your processed voice "
-                               "into its playback side; other apps record from its recording side.");
+            ImGui::TextWrapped("Echo plays your voice into a virtual cable; apps pick the cable's other end as their "
+                               "microphone. Choose the cable:");
             for (const auto& c : pairs) {
                 if (c.secondary) continue;
                 const bool sel = vb && vb->output.deviceId == c.renderId;
@@ -264,8 +271,7 @@ void EchoApp::drawWizard() {
                 ImGui::EndDisabled();
                 if (cableTestRunning_) ImGui::TextColored(toVec4(p.warn), "Testing...");
                 else if (cableTestDone_ && cableTestRender_ == vb->output.deviceId)
-                    ImGui::TextColored(toVec4(cableTestResult_.ok ? p.good : p.bad), "%s (%.1f dBFS, ~%.0f ms)",
-                                       cableTestResult_.message.c_str(), cableTestResult_.levelDb, cableTestResult_.latencyMs);
+                    ImGui::TextColored(toVec4(cableTestResult_.ok ? p.good : p.bad), "%s", cableTestResult_.message.c_str());
             }
         }
         break;
@@ -286,8 +292,8 @@ void EchoApp::drawWizard() {
         }
         if (mic && a) {
             bool mon = mic->rt->sends[a->slot].enabled.load();
-            if (ImGui::Checkbox("Hear myself in my headphones (monitoring)", &mon)) mc_->setSend(mic->id, a->id, mon);
-            ImGui::TextColored(toVec4(p.warn), "Use headphones for monitoring; speakers can cause acoustic feedback.");
+            if (ImGui::Checkbox("Hear myself in my headphones", &mon)) mc_->setSend(mic->id, a->id, mon);
+            ImGui::TextColored(toVec4(p.warn), "Use headphones for this; speakers can cause feedback.");
         }
         if (mic) {
             ImGui::Spacing();
@@ -302,30 +308,35 @@ void EchoApp::drawWizard() {
         }
         break;
     }
-    case 6:
-        ImGui::TextWrapped("How should audio be routed? (You can change this later in the Mixer.)");
-        for (int i = 0; i < static_cast<int>(ScenePreset::Count); ++i) {
-            ImGui::RadioButton(scenePresetName(static_cast<ScenePreset>(i)), &g_scene, i);
-            ImGui::TextDisabled("   %s", scenePresetDescription(static_cast<ScenePreset>(i)));
-        }
-        if (ImGui::Button("Apply routing")) toast(applyScenePreset(*mc_, static_cast<ScenePreset>(g_scene)), 1);
-        break;
-    case 7: {
-        BusModel* vb = busOfKind(BusKind::Virtual);
-        std::string capture = "the cable's recording side";
-        for (const auto& c : backend_->cablePairs())
-            if (vb && c.renderId == vb->output.deviceId) capture = c.captureName;
-        ImGui::TextWrapped("In Discord: User Settings > Voice & Video > Input Device > select:");
-        ImGui::PushFont(fonts().semibold, 0.0f);
-        ImGui::TextColored(toVec4(p.accent), "   %s", capture.c_str());
-        ImGui::PopFont();
-        ImGui::TextWrapped("Then use 'Let's Check' in Discord and speak; you should see Discord's meter move and hear "
-                           "your processed voice. The same works in OBS (Audio Input Capture), browsers, games and "
-                           "recording software. If the app shows no signal, make sure Echo's virtual mic bus meter "
-                           "is moving and that the app is not using its own exclusive mode.");
+    case 6: {
+        BusModel* a = busOfKind(BusKind::Physical);
+        const std::string phones =
+            a && !a->output.deviceName.empty() ? a->output.deviceName : std::string("your headphones or speakers");
+        ImGui::TextWrapped("In the app you talk in, open its voice or audio settings and set:");
         ImGui::Spacing();
-        ImGui::TextWrapped("Tip: Voices has one-click voice characters and pitch correction; Apps lets you "
-                           "capture music or game audio per app.");
+        const float col = 190.0f * sc;
+        ImGui::TextColored(toVec4(p.text2), "Microphone (input)");
+        ImGui::SameLine(col);
+        ImGui::PushFont(fonts().semibold, 0.0f);
+        ImGui::TextColored(toVec4(p.accent), "%s", virtualMicName().c_str());
+        ImGui::PopFont();
+        ImGui::TextColored(toVec4(p.text2), "Speakers (output)");
+        ImGui::SameLine(col);
+        ImGui::PushFont(fonts().semibold, 0.0f);
+        ImGui::TextUnformatted(phones.c_str());
+        ImGui::PopFont();
+        ImGui::Spacing();
+        ImGui::TextWrapped("For example:");
+        ImGui::BulletText("Discord: User Settings > Voice & Video > Input Device.");
+        ImGui::BulletText("Roblox: Esc > Settings > Input Device (needs voice chat turned on).");
+        ImGui::Spacing();
+        ImGui::TextWrapped("Leave Windows as it is:");
+        ImGui::BulletText("Windows output: your headphones or speakers.");
+        ImGui::BulletText("Windows input: your real microphone. Echo listens to it, so don't make the cable your default "
+                          "microphone.");
+        ImGui::BulletText("No need to change the Windows volume mixer (only for an app that has no microphone setting).");
+        ImGui::Spacing();
+        ImGui::TextWrapped("Check it: speak, and the app's microphone meter should move.");
         break;
     }
     }

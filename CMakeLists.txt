@@ -78,7 +78,7 @@ endif()
 file(GLOB ECHO_CORE_SOURCES CONFIGURE_DEPENDS
     src/core/*.cpp src/dsp/*.cpp src/dsp/effects/*.cpp src/session/*.cpp src/ai/*.cpp)
 add_library(echo_core STATIC ${ECHO_CORE_SOURCES})
-target_link_libraries(echo_core PUBLIC echo_options avrt rnnoise)
+target_link_libraries(echo_core PUBLIC echo_options avrt rnnoise dxgi)
 
 # ---------------------------------------------------------------------------
 # Windows audio platform layer (WASAPI, sessions, virtual cables)
@@ -87,7 +87,7 @@ file(GLOB ECHO_AUDIO_SOURCES CONFIGURE_DEPENDS src/audio/*.cpp)
 if(ECHO_AUDIO_SOURCES)
 add_library(echo_audio STATIC ${ECHO_AUDIO_SOURCES})
 target_link_libraries(echo_audio PUBLIC echo_core ole32 oleaut32 uuid mmdevapi avrt ksuser
-    propsys shell32 shlwapi psapi version runtimeobject winmm)
+    propsys shell32 shlwapi psapi version runtimeobject winmm mfplat mfreadwrite mfuuid winhttp bcrypt)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -110,6 +110,26 @@ target_link_libraries(imgui PUBLIC d3d11 dxgi d3dcompiler dwmapi)
 # ---------------------------------------------------------------------------
 # Application
 # ---------------------------------------------------------------------------
+# The soundboard's built-in sounds live next to the executables (also for
+# the tests and tools in bin/).
+file(GLOB ECHO_SOUND_FILES CONFIGURE_DEPENDS sounds/*)
+add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/sounds.stamp
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/sounds
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ECHO_SOUND_FILES} ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/sounds
+    COMMAND ${CMAKE_COMMAND} -E touch ${CMAKE_BINARY_DIR}/sounds.stamp
+    DEPENDS ${ECHO_SOUND_FILES}
+    COMMENT "Copying the built-in sounds")
+add_custom_target(echo_sounds ALL DEPENDS ${CMAKE_BINARY_DIR}/sounds.stamp)
+# The documentation too (Settings > About > Open documentation).
+file(GLOB ECHO_DOC_FILES CONFIGURE_DEPENDS docs/*)
+add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/docs.stamp
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/docs
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ECHO_DOC_FILES} ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/docs
+    COMMAND ${CMAKE_COMMAND} -E touch ${CMAKE_BINARY_DIR}/docs.stamp
+    DEPENDS ${ECHO_DOC_FILES}
+    COMMENT "Copying the documentation")
+add_custom_target(echo_docs ALL DEPENDS ${CMAKE_BINARY_DIR}/docs.stamp)
+
 file(GLOB ECHO_UI_SOURCES CONFIGURE_DEPENDS src/ui/*.cpp src/app/*.cpp)
 if(ECHO_UI_SOURCES)
 add_executable(Echo WIN32 ${ECHO_UI_SOURCES} resources/Echo.rc)
@@ -118,6 +138,7 @@ if(NOT MSVC)
     target_link_options(Echo PRIVATE -municode)
 endif()
 set_target_properties(Echo PROPERTIES OUTPUT_NAME "${ECHO_APP_NAME}")
+add_dependencies(Echo echo_sounds echo_docs)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -133,6 +154,7 @@ if(ECHO_BUILD_TESTS)
     endif()
     target_compile_definitions(echo_tests PRIVATE ECHO_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/data"
         ECHO_TEST_SPEECH_DIR="${CMAKE_BINARY_DIR}/test-speech")
+    add_dependencies(echo_tests echo_sounds)
     add_test(NAME echo_tests COMMAND echo_tests)
 endif()
 
@@ -145,6 +167,7 @@ if(ECHO_BUILD_TOOLS)
 
     add_executable(echo_hwtest tools/hwtest.cpp)
     target_link_libraries(echo_hwtest PRIVATE echo_audio)
+    add_dependencies(echo_hwtest echo_sounds)
     if(NOT MSVC)
         target_link_options(echo_hwtest PRIVATE -municode)
     endif()
@@ -157,5 +180,6 @@ if(TARGET Echo)
     install(TARGETS Echo RUNTIME DESTINATION .)
 endif()
 install(DIRECTORY presets/ DESTINATION presets)
+install(DIRECTORY sounds/ DESTINATION sounds)
 install(FILES LICENSE THIRD_PARTY_NOTICES.md README.md DESTINATION .)
 install(DIRECTORY docs/ DESTINATION docs)

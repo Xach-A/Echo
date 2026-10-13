@@ -48,9 +48,22 @@ bool Chip(const char* label, bool on);
 bool Pill(const char* label, ImU32 fill, ImU32 border, ImU32 fg, float width = 0.0f);
 // Bus send toggle: A buses blue, B buses violet.
 bool SendPill(const char* label, bool on, bool busB, float width = 0.0f, bool blocked = false);
+// Height a Tile needs to show all of its text at this width.
+float TileHeight(const char* icon, const char* name, const char* sub, float width);
 // Voice/preset tile. `corner` is small text in the top-right corner.
 bool Tile(const char* id, const char* icon, const char* name, const char* sub, const char* corner, bool selected,
           ImVec2 size);
+// Soundboard pad: a square in the pad's colour with its name, key and play
+// position (progress 0..1, < 0 = not playing). Reports the left button going
+// down and up (a pad can play while held) and requests to edit it (right
+// click or the corner button).
+struct PadEvents {
+    bool pressed = false, released = false, edit = false;
+};
+PadEvents SoundPadTile(const char* id, const char* icon, const char* name, const char* keyText, const char* modeText,
+                       ImU32 tint, float progress, bool warn, ImVec2 size);
+// Dashed "add" tile.
+bool AddTile(const char* id, const char* label, ImVec2 size);
 // Radio-style choice row.
 bool RadioRow(const char* id, const char* title, const char* sub, bool selected, float width = 0.0f);
 // Checkbox row (bordered).

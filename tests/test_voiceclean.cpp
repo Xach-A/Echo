@@ -371,11 +371,13 @@ TEST_CASE("denoise: voice activity gate closes on noise and opens for speech") {
     auto room = pinkNoise(x.size(), -50.0f, 21);
     for (size_t i = 0; i < x.size(); ++i) x[i] += room[i];
     // Partial strength leaves some room tone so the gate's extra attenuation
-    // is measurable.
+    // is measurable (typing removal off: this is about the gate alone).
     auto plain = makeFx("voice_denoise");
     auto gated = makeFx("voice_denoise");
     plain->setParam("strength", 50.0f);
     gated->setParam("strength", 50.0f);
+    plain->setParam("clicks", 0.0f);
+    gated->setParam("clicks", 0.0f);
     gated->setParam("vad_gate", 1.0f);
     gated->setParam("vad_range", -30.0f);
     auto y0 = run(*plain, x);

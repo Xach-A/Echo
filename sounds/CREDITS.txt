@@ -1,0 +1,44 @@
+Echo's built-in soundboard sounds
+=================================
+
+These are real recordings and game sounds by the people below, not made by
+Echo and not AI-generated. The BigSoundBank sounds are field and studio
+recordings (each sound's page lists the recorder and microphone used); the
+others were published on OpenGameArt, Kenney and Wikimedia Commons in
+2016-2020, before AI sound generators were available, except the ta-da, which
+its author made in GarageBand with its trumpet sounds (2025).
+
+All but one are dedicated to the public domain (CC0 1.0,
+https://creativecommons.org/publicdomain/zero/1.0/); sad_trombone.wav is
+licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
+
+Echo trimmed each sound to length (with a fade-out where it was cut), removed
+DC offset, set the level and converted it to 48 kHz 16-bit WAV
+(tools/prepare_sounds.py). buzzer.wav was also saturated and low-passed, which
+turns the recorded hum into a game-show buzz, and tada.wav is the last two
+notes of its fanfare. Nothing else was changed.
+
+File               Original                               Author            Source                                                     License
+airhorn.wav        Gas fog horn #1 (1048)                 Joseph Sardin     https://bigsoundbank.com/gas-fog-horn-1-s1048.html           CC0
+clown_horn.wav     Pneumatic horn, double #2 (1831)       Joseph Sardin     https://bigsoundbank.com/pneumatic-horn-double-2-s1831.html  CC0
+rimshot.wav        Battery Joke #1 (0433)                 Simon Lacelle     https://bigsoundbank.com/battery-joke-s0433.html             CC0
+sad_trombone.wav   Sad Trombone.wav                       Sad Tromboner     https://commons.wikimedia.org/wiki/File:Sad_Trombone.wav     CC BY 4.0
+tada.wav           Classic fanfare lick (fanfare.ogg)     fvcalderan        https://opengameart.org/content/classic-fanfare-lick         CC0
+ding.wav           Counter bell #1 (0479)                 Joseph Sardin     https://bigsoundbank.com/counter-bell-s0479.html             CC0
+buzzer.wav         Low frequency continuous buzzer (0593) Joseph Sardin     https://bigsoundbank.com/low-frequency-continuous-buzzer-s0593.html CC0
+drumroll.wav       Drum roll 3 S (2406)                   Joseph Sardin     https://bigsoundbank.com/drum-roll-3-s-s2406.html            CC0
+applause.wav       Applause #1 (2363)                     Dorian Clair      https://bigsoundbank.com/applause-1-s2363.html               CC0
+boing.wav          Boing Cartoon #2 (2278)                Joseph Sardin     https://bigsoundbank.com/boing-cartoon-2-s2278.html          CC0
+whoosh.wav         Whoosh #3 (1795)                       Joseph Sardin     https://bigsoundbank.com/whoosh-3-s1795.html                 CC0
+laser.wav          laserRetro_004.ogg (Sci-fi Sounds 1.0) Kenney            https://kenney.nl/assets/sci-fi-sounds                       CC0
+explosion.wav      Chunky Explosion                       Joth              https://opengameart.org/content/chunky-explosion             CC0
+gunshot.wav        Explosion far Away #1 (1023)           Joseph Sardin     https://bigsoundbank.com/explosion-far-away-s1023.html       CC0
+boom.wav           Bass Tom, #1 (2338)                    Joseph Sardin     https://bigsoundbank.com/bass-tom-1-s2338.html               CC0
+crickets.wav       Field cricket (1020)                   Joseph Sardin     https://bigsoundbank.com/field-cricket-s1020.html            CC0
+
+Attribution for the CC BY 4.0 sound: "Sad Trombone" by Sad Tromboner
+(https://commons.wikimedia.org/wiki/User:Sad_Tromboner), from Wikimedia
+Commons, licensed under CC BY 4.0; trimmed and level-adjusted for Echo.
+
+Thanks to BigSoundBank (https://bigsoundbank.com), Kenney (https://kenney.nl)
+and OpenGameArt (https://opengameart.org) for sharing their sounds freely.

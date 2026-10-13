@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <set>
 
 #include "core/Log.h"
@@ -32,7 +33,8 @@ bool endpointDead(EndpointStatus s) {
 
 } // namespace
 
-MixerController::MixerController(DeviceBackend& backend) : backend_(backend), tone_(std::make_shared<ToneSource>()) {
+MixerController::MixerController(DeviceBackend& backend)
+    : backend_(backend), tone_(std::make_shared<ToneSource>()), soundboard_(std::make_shared<SoundboardSource>()) {
     tone_->enabled = false;
     tone_->key = "tone";
 }
@@ -59,6 +61,7 @@ void MixerController::prepareBus(BusModel& b) {
 void MixerController::prepareAll() {
     engine_.setFormat(session_.engine.sampleRate, session_.engine.blockSize);
     tone_->prepare(engine_.sampleRate(), engine_.blockSize(), engine_.blockSeconds());
+    soundboard_->prepare(engine_.sampleRate(), engine_.blockSize(), engine_.blockSeconds());
     for (auto& s : session_.strips) prepareStrip(s);
     for (auto& b : session_.buses) prepareBus(b);
 }
@@ -173,6 +176,11 @@ MixerController::SourceEntry* MixerController::ensureSource(SourceRef& ref) {
     e.ref = ref;
     if (ref.kind == SourceKind::ToneGenerator) {
         e.runtime = tone_;
+        e.error.clear();
+        return &e;
+    }
+    if (ref.kind == SourceKind::Soundboard) {
+        e.runtime = soundboard_;
         e.error.clear();
         return &e;
     }
@@ -563,6 +571,10 @@ void MixerController::rebuildGraph() {
         auto it = sinkIndex.find(masterSink);
         g->masterSink = it != sinkIndex.end() ? it->second : -1;
     }
+
+    // The soundboard's sounds: the snapshot keeps them alive while the
+    // engine can still be playing them.
+    if (soundboard_->bank()) g->keepAlive.push_back(std::const_pointer_cast<SoundBank>(soundboard_->bank()));
 
     // Recording taps.
     for (const auto& t : recorder_.taps()) {
@@ -967,7 +979,7 @@ bool MixerController::assignCablesToEmptyVirtualBuses() {
             ECHO_LOG_INFO("Virtual bus '%s' assigned to cable '%s'", b.name.c_str(), d.name.c_str());
             notices_.push_back("Virtual cable found: '" + b.name + "' now plays into " + d.name +
                                (capture.empty() ? std::string(".")
-                                                : ". In Discord, OBS or games choose \"" + capture + "\" as the microphone."));
+                                                : ". Select \"" + capture + "\" as the microphone in your app."));
             assigned = true;
             break;
         }
@@ -979,7 +991,76 @@ bool MixerController::assignCablesToEmptyVirtualBuses() {
     return assigned;
 }
 
+void MixerController::setSoundBank(std::shared_ptr<const SoundBank> bank) {
+    soundboard_->setBank(std::move(bank));
+    if (started_) rebuildGraph();
+}
+
+StripModel* MixerController::soundboardStrip() {
+    for (auto& s : session_.strips)
+        if (s.source.kind == SourceKind::Soundboard) return &s;
+    return nullptr;
+}
+
+uint32_t MixerController::ensureSoundboardStrip() {
+    if (StripModel* s = soundboardStrip()) return s->id;
+    if (session_.strips.size() >= static_cast<size_t>(kMaxStrips)) return 0;
+    StripModel s;
+    s.id = session_.nextId++;
+    s.name = "Soundboard";
+    s.group = StripGroup::Generator;
+    s.source.kind = SourceKind::Soundboard;
+    s.color = 0xFF6A8CFF;
+    s.rt->chanCount = 2;
+    // Others hear it (virtual mic) and so do you (headphones).
+    for (const auto& b : session_.buses) {
+        const bool firstOfKind = &b == &*std::find_if(session_.buses.begin(), session_.buses.end(),
+                                                       [&](const BusModel& o) { return o.kind == b.kind; });
+        if (firstOfKind) s.rt->sends[b.slot].enabled = true;
+    }
+    prepareStrip(s);
+    session_.strips.push_back(std::move(s));
+    const uint32_t id = session_.strips.back().id;
+    if (started_) rebuildGraph();
+    dirty_ = true;
+    return id;
+}
+
 void MixerController::migrateSession() {
+    if (!session_.soundboard.initialized) {
+        addBuiltinPads(session_.soundboard);
+        session_.soundboard.initialized = true;
+        dirty_ = true;
+    } else if (session_.soundboard.builtinVersion < kBuiltinSoundsVersion) {
+        addNewBuiltinPads(session_.soundboard); // sounds added to Echo since
+        dirty_ = true;
+    }
+    if (session_.configVersion < 3) {
+        ensureSoundboardStrip();
+        dirty_ = true;
+    }
+    if (session_.configVersion < 4) {
+        // The voice gate's depth went from -30 dB (hardly heard after the
+        // noise removal) to -60 dB: gates still at the old default move along.
+        for (auto& s : session_.strips)
+            for (auto& e : s.chain)
+                if (std::string(e->typeId()) == noiseSuppressorTypeId()) {
+                    const int i = e->paramIndex("vad_range");
+                    if (i >= 0 && std::fabs(e->param(i) + 30.0f) < 0.01f) e->setParam(i, -60.0f);
+                }
+        dirty_ = true;
+    }
+    if (session_.configVersion < 5) {
+        // The AI voice's Buffer became the least delay (the voice's Response
+        // sets what it needs): ones still at the old default of 400 drop to 100.
+        for (auto& s : session_.strips)
+            for (auto& e : s.chain)
+                if (std::string(e->typeId()) == "ai_voice") {
+                    const int i = e->paramIndex("latency");
+                    if (i >= 0 && std::fabs(e->param(i) - 400.0f) < 0.01f) e->setParam(i, 100.0f);
+                }
+        dirty_ = true;
+    }
     if (session_.configVersion < 2) {
         // Noise suppression became a default part of microphone inputs. Add
         // it once to microphones of older sessions; afterwards the user's
@@ -1070,6 +1151,44 @@ std::string MixerController::clockDescription() const {
 // Defaults
 // ---------------------------------------------------------------------------
 
+void MixerController::resetSettings(const ResetParts& parts) {
+    const Session defaults;
+    if (parts.mixer) {
+        // A fresh installation's inputs and outputs. createDefaultSession
+        // keeps the other settings; hotkeys are kept here unless reset too.
+        const HotkeySettings hotkeys = session_.hotkeys;
+        session_.autoNoiseSuppression = defaults.autoNoiseSuppression;
+        createDefaultSession();
+        session_.hotkeys = hotkeys;
+    }
+    if (parts.hotkeys) session_.hotkeys = defaults.hotkeys;
+    if (parts.soundboard) {
+        session_.soundboard = SoundboardSettings{};
+        addBuiltinPads(session_.soundboard);
+        session_.soundboard.initialized = true;
+    }
+    if (parts.look) {
+        UiSettings ui = defaults.ui;
+        ui.windowX = session_.ui.windowX;
+        ui.windowY = session_.ui.windowY;
+        ui.windowW = session_.ui.windowW;
+        ui.windowH = session_.ui.windowH;
+        ui.maximized = session_.ui.maximized;
+        session_.ui = ui;
+    }
+    if (parts.audio) {
+        session_.recorder = defaults.recorder;
+        const EngineSettings& d = defaults.engine;
+        EngineSettings& e = session_.engine;
+        const bool formatChanged = e.sampleRate != d.sampleRate || e.blockSize != d.blockSize ||
+                                   e.resamplerQuality != d.resamplerQuality || e.lowLatencyShared != d.lowLatencyShared;
+        e = d;
+        if (formatChanged) restart();
+        else if (started_) rebuildGraph();
+    }
+    dirty_ = true;
+}
+
 void MixerController::createDefaultSession() {
     Session fresh;
     fresh.engine = session_.engine;
@@ -1078,6 +1197,7 @@ void MixerController::createDefaultSession() {
     fresh.firstRunCompleted = session_.firstRunCompleted;
     fresh.autoNoiseSuppression = session_.autoNoiseSuppression;
     fresh.cables = session_.cables;
+    fresh.soundboard = session_.soundboard; // the user's sounds stay
     const bool wasRunning = engine_.running() || started_;
     stop();
     session_ = std::move(fresh);
@@ -1123,6 +1243,11 @@ void MixerController::createDefaultSession() {
     desk.source.kind = SourceKind::SystemExcludingEcho;
     desk.color = 0xFF7CE38B;
     session_.strips.push_back(std::move(desk));
+    ensureSoundboardStrip();
+    if (!session_.soundboard.initialized) {
+        addBuiltinPads(session_.soundboard);
+        session_.soundboard.initialized = true;
+    }
 
     prepareAll();
     if (wasRunning) start();

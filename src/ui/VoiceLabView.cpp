@@ -5,15 +5,21 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <cmath>
+#include <chrono>
+#include <future>
 #include <cstdio>
 #include <filesystem>
 
 #include "ai/AiVoiceEffect.h"
+#include "ai/RvcVoice.h"
+#include "audio/Download.h"
 #include "ai/OrtRuntime.h"
 #include "core/Text.h"
 #include "dsp/MusicTheory.h"
 #include "dsp/NoiseSuppressorInfo.h"
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "session/Paths.h"
 #include "ui/App.h"
 #include "ui/EffectVisuals.h"
@@ -28,7 +34,6 @@ namespace {
 
 std::vector<ai::ModelManifest> g_models;
 bool g_modelsScanned = false;
-bool g_preferGpu = false;
 bool g_aiOpen = false;
 
 Effect* findEffect(StripModel& s, const char* type) {
@@ -68,9 +73,19 @@ bool inCategory(const ChainPreset& p, int cat) {
 
 } // namespace
 
+std::string bufferSizeName(int blockSize, int sampleRate) {
+    const double t = blockSize / static_cast<double>(std::max(1, sampleRate));
+    std::string name = t < 0.004 ? "Tiny" : t < 0.008 ? "Small" : t <= 0.0111 ? "Normal" : t <= 0.022 ? "Large" : "Extra large";
+    if (blockSize == 480 && sampleRate == 48000) name += " (recommended)";
+    else if (t < 0.004) name += " (needs a fast PC)";
+    else if (t > 0.022) name += " (safest)";
+    return name;
+}
+
 const char* presetIcon(const std::string& name) {
     auto has = [&](const char* s) { return name.find(s) != std::string::npos; };
     if (name.empty()) return ICON_MIC;
+    if (name == "Pain") return ICON_WARNING;
     if (has("Robot") || has("Whisper") || has("Alien") || has("8-bit")) return ICON_ROBOT;
     if (has("Deep") || has("Monster") || has("Giant") || has("Masculine") || has("Octave")) return ICON_DOWN;
     if (has("Chipmunk") || has("Child") || has("Feminine")) return ICON_UP;
@@ -91,7 +106,7 @@ void EchoApp::drawVoiceLab() {
         else if (!s.strips.empty()) voiceTarget_ = s.strips.front().id;
     }
     StripModel* target = s.strip(voiceTarget_);
-    pop::PageTitle("Voices", "Pick a voice. The delay it adds is shown on each one.");
+    pop::PageTitle("Voices", "Pick a voice, or mix several.");
     if (!target) {
         pop::Caption("Add a microphone input to use the voice changer.");
         if (pop::Button("Choose a microphone", pop::Btn::Primary)) navigate(Page::Devices);
@@ -106,6 +121,16 @@ void EchoApp::drawVoiceLab() {
     for (int c = 0; c < (anyUser ? 5 : 4); ++c) {
         if (c) ImGui::SameLine(0, 6.0f * sc);
         if (pop::Chip(kCategoryLabels[c], voiceCategory_ == c)) voiceCategory_ = c;
+    }
+    {
+        // One voice at a time, or several mixed.
+        const float segW = 230.0f * sc;
+        const float comboSpace = s.strips.size() > 1 ? 220.0f * sc + 104.0f * sc : 0.0f;
+        ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 12.0f * sc, ImGui::GetStyle().WindowPadding.x + avail - segW - comboSpace));
+        int mix = voiceMix_ ? 1 : 0;
+        const char* modes[] = {"One voice", "Mix voices"};
+        if (pop::Segmented("##voicemix", &mix, modes, 2, segW)) voiceMix_ = mix == 1;
+        Tip("Mix voices: click voices to add them to the mix or take them out, e.g. Deep Voice + Cave Echo.");
     }
     if (s.strips.size() > 1) {
         const float comboW = 220.0f * sc;
@@ -145,20 +170,37 @@ void EchoApp::drawVoiceLab() {
         const float tgap = 12.0f * sc;
         const int cols = pop::columnsFor(leftW, 150.0f * sc, tgap);
         const float tw = (leftW - tgap * (cols - 1)) / cols;
+        const bool isMainMic = primaryMic() == target;
+        // Each row as tall as its tile with the most text, so no description
+        // is cut off (at any width or interface size).
+        std::vector<float> rowH((list.size() + cols - 1) / cols, 118.0f * sc);
+        for (size_t i = 0; i < list.size(); ++i)
+            rowH[i / cols] = std::max(rowH[i / cols], pop::TileHeight(ICON_ADD, list[i] ? list[i]->name.c_str() : "Original voice",
+                                                                      list[i] ? list[i]->description.c_str()
+                                                                              : "Your voice, with its noise and echo cleanup",
+                                                                      tw));
         for (size_t i = 0; i < list.size(); ++i) {
             if (i % cols) ImGui::SameLine(0, tgap);
             const ChainPreset* pr = list[i];
-            const bool sel = pr ? (voiceFx && target->voice == pr->name) : !voiceFx;
-            char delay[32];
-            const double ms = pr ? presetDelayMs(*pr) : 0.0;
-            if (ms < 0.5) std::snprintf(delay, sizeof(delay), pr ? "+0 ms" : "");
-            else std::snprintf(delay, sizeof(delay), "+%.0f ms", ms);
+            const bool on = pr && std::find(target->voices.begin(), target->voices.end(), pr->name) != target->voices.end();
+            const bool sel = pr ? (voiceFx && on) : !voiceFx;
+            // The key that switches exactly this voice, if any.
+            std::string corner;
+            if (pr && isMainMic)
+                for (const auto& vk : s.hotkeys.voiceKeys)
+                    if (!vk.key.empty() && vk.voices.size() == 1 && vk.voices[0] == pr->name) {
+                        corner = keyBindingName(vk.key);
+                        break;
+                    }
             ImGui::PushID(static_cast<int>(i));
             const std::string name = pr ? pr->name : "Original voice";
             const std::string desc = pr ? pr->description : "Your voice, with its noise and echo cleanup";
-            if (pop::Tile("##tile", presetIcon(pr ? pr->name : ""), name.c_str(), desc.c_str(), delay, sel, ImVec2(tw, 118.0f * sc)))
-                applyVoice(*target, pr);
-            Tip(desc.c_str());
+            if (pop::Tile("##tile", voiceMix_ && pr ? (on ? ICON_CHECK : ICON_ADD) : presetIcon(pr ? pr->name : ""), name.c_str(), desc.c_str(),
+                          corner.c_str(), sel, ImVec2(tw, rowH[i / cols]))) {
+                if (voiceMix_ && pr) toggleVoice(*target, pr->name);
+                else applyVoice(*target, pr);
+            }
+            Tip(voiceMix_ && pr ? (on ? "Click to take it out of the mix." : "Click to add it to the mix.") : desc.c_str());
             ImGui::PopID();
         }
         if (list.empty()) pop::Hint("No presets here yet. Save one from the effects editor.");
@@ -166,12 +208,16 @@ void EchoApp::drawVoiceLab() {
         ImGui::Dummy(ImVec2(0, 8.0f * sc));
         pop::BeginCard("##ai", 0.0f, 0.0f, true);
         pop::CardTitle("AI voice (optional)");
-        pop::Caption("Runs on this PC. Needs ONNX Runtime and a voice model you add yourself; Echo doesn't include or "
-                     "download models.");
+        pop::Caption("Use RVC voice models (from RVC or Applio) on this PC. Echo doesn't include voices: you add your own.");
         if (pop::SmallButton(g_aiOpen ? "Hide" : "Set up AI voice")) g_aiOpen = !g_aiOpen;
+        if (snapshotShowAi_) g_aiOpen = true; // UI snapshot: the AI voice setup in view
         if (g_aiOpen) {
             pop::Divider();
             drawAiPanel(*target);
+            if (snapshotShowAi_) {
+                ImGui::Dummy(ImVec2(1, 1));
+                ImGui::ScrollToItem(ImGuiScrollFlags_KeepVisibleEdgeY);
+            }
         }
         pop::EndCard();
     }
@@ -182,12 +228,76 @@ void EchoApp::drawVoiceLab() {
     ImGui::BeginChild("##voiceright", ImVec2(rightW, 0), ImGuiChildFlags_AutoResizeY, ImGuiWindowFlags_NoScrollbar);
     const ChainTarget t{false, target->id};
     const double sr = mc_->engine().sampleRate();
+    // Quick controls the voice's preset gives its effects ("ui" key, e.g.
+    // Pain): Intensity = a distortion stage's drive, Bit-crush = an optional
+    // bit-crusher. The n-th effect of a type in the preset is the n-th of that
+    // type in the chain (the noise cleanup kept in front has other types).
+    Effect* clip = nullptr;
+    Effect* crush = nullptr;
+    const json* clipFx = nullptr; // its entry in the preset
+    float clipDefault = 0.0f;
+    const std::string mixLabel = voicesLabel(target->voices);
+    for (const std::string& voiceName : target->voices) {
+        const ChainPreset* pr = presets_.find(voiceName);
+        if (!pr || clip || crush) continue;
+        // The n-th effect of a type among this voice's own effects.
+        auto nth = [&](const std::string& type, int n) -> Effect* {
+            for (auto& e : target->chain)
+                if (e->voice == voiceName && type == e->typeId() && n-- == 0) return e.get();
+            return nullptr;
+        };
+        for (size_t i = 0; i < pr->chain.size(); ++i) {
+            const json& fx = pr->chain[i];
+            const std::string type = fx.value("type", ""), ui = fx.value("ui", "");
+            int n = 0;
+            for (size_t k = 0; k < i; ++k) n += pr->chain[k].value("type", "") == type;
+            if (ui == "intensity" && type == "distortion") {
+                clip = nth(type, n);
+                clipFx = &fx;
+                clipDefault = fx.contains("params") ? fx["params"].value("drive", 18.0f) : 18.0f;
+            } else if (ui == "optional" && type == "bitcrusher") {
+                crush = nth(type, n);
+            }
+        }
+    }
+    Effect* limiter = nullptr; // the limiter after the Intensity stage
+    for (size_t i = 0, seen = 0; clip && i < target->chain.size(); ++i) {
+        if (target->chain[i].get() == clip) seen = 1;
+        else if (seen && std::string(target->chain[i]->typeId()) == "limiter" && !limiter) limiter = target->chain[i].get();
+    }
+    auto distortionControls = [&]() {
+        if (clip) {
+            float drive = clip->param(0);
+            char v[24];
+            std::snprintf(v, sizeof(v), "+%.0f dB", drive);
+            // Double-click resets to the voice's own setting.
+            if (pop::SliderRow("Intensity", v, "##intensity", &drive, 0.0f, 48.0f, clipDefault))
+                applyIntensity(*clip, *clipFx, std::round(drive));
+            const bool even = clipFx->value("ui_makeup", 0.0f) > 0.0f;
+            const int ceil = limiter ? limiter->paramIndex("ceiling") : -1;
+            char hint[200];
+            if (limiter && !limiter->bypass.load() && ceil >= 0)
+                std::snprintf(hint, sizeof(hint), "How much the voice is distorted%s. Peaks stay under %.1f dBFS at any setting.",
+                              even ? "; it stays about as loud" : "", limiter->param(ceil));
+            else if (limiter)
+                std::snprintf(hint, sizeof(hint), "How much the voice is distorted. Its limiter is off, so higher settings can be louder.");
+            else
+                std::snprintf(hint, sizeof(hint), "How much the voice is distorted.");
+            pop::Hint(hint);
+        }
+        if (crush) {
+            bool on = !crush->bypass.load();
+            if (pop::SwitchRow("Bit-crush", "Harsher, digital crunch on top", &on, false)) crush->bypass = !on;
+        }
+    };
+    const bool hasDistortion = clip || crush;
+
     pop::BeginCard("##tune");
     Effect* pitch = findEffect(*target, "pitch");
     Effect* tune = findEffect(*target, "autotune");
     const std::string label = voiceLabel(*target);
     if (pitch) {
-        pop::CardTitle(("Pitch & formant · " + (target->voice.empty() ? std::string("Custom") : target->voice)).c_str());
+        pop::CardTitle(("Pitch & formant · " + (mixLabel.empty() ? std::string("Custom") : mixLabel)).c_str());
         float st = pitch->param(0);
         if (pop::SliderRow("Pitch", signedText(st, "semitones").c_str(), "##pitch", &st, -24.0f, 24.0f, 0.0f))
             pitch->setParam(0, std::round(st * 2.0f) / 2.0f);
@@ -199,19 +309,14 @@ void EchoApp::drawVoiceLab() {
             pitch->setParam(3, preserve ? 1.0f : 0.0f);
         // Quality: the phase vocoder's window, so its delay, at this rate.
         const int base = sr > 70000 ? 2 : sr > 35000 ? 1 : 0;
-        char ms[3][24];
-        const char* subs[3];
-        for (int q = 0; q < 3; ++q) {
-            std::snprintf(ms[q], sizeof(ms[q]), "%.0f ms", ((512 << base) << q) * 1000.0 / sr);
-            subs[q] = ms[q];
-        }
-        const char* qs[] = {"Low latency", "Balanced", "High quality"};
+        (void)base;
+        const char* qs[] = {"Fastest", "Balanced", "Smoothest"};
         int q = static_cast<int>(pitch->param(4));
         pop::Label("Quality");
-        if (pop::Segmented("##quality", &q, qs, 3, ImGui::GetContentRegionAvail().x, subs)) pitch->setParam(4, static_cast<float>(q));
-        pop::Hint("Delay of the pitch shifter. Larger windows sound smoother.");
+        if (pop::Segmented("##quality", &q, qs, 3, ImGui::GetContentRegionAvail().x)) pitch->setParam(4, static_cast<float>(q));
+        pop::Hint("Smoother sounds better but reaches the listener a little later.");
     } else if (tune) {
-        pop::CardTitle(("Pitch correction · " + (target->voice.empty() ? std::string("Custom") : target->voice)).c_str());
+        pop::CardTitle(("Pitch correction · " + (mixLabel.empty() ? std::string("Custom") : mixLabel)).c_str());
         const float half = (ImGui::GetContentRegionAvail().x - 10.0f * sc) * 0.5f;
         int key = static_cast<int>(tune->param(0));
         const float rowY = ImGui::GetCursorPosY();
@@ -240,11 +345,12 @@ void EchoApp::drawVoiceLab() {
             ParamControl(*tune, 5);
         }
         drawPitchGraph(*tune, ImVec2(ImGui::GetContentRegionAvail().x, 120.0f * sc));
-        char note[64];
-        std::snprintf(note, sizeof(note), "Pitch correction adds %.0f ms.", tune->latencySamples() * 1000.0 / sr);
-        pop::Hint(note);
+        pop::Hint("Pitch correction reaches the listener a little later than your plain voice.");
+    } else if (hasDistortion) {
+        pop::CardTitle(("Distortion · " + mixLabel).c_str());
+        distortionControls();
     } else {
-        pop::CardTitle(target->voice.empty() && label == "your own voice" ? "Original voice" : label.c_str());
+        pop::CardTitle(target->voices.empty() && label == "your own voice" ? "Original voice" : label.c_str());
         pop::Caption(label == "your own voice" ? "Your own voice. Noise removal and speaker echo removal stay on."
                                                : "This voice has no pitch control of its own. You can add one.");
         if (pop::Button("Add pitch & formant shifter")) {
@@ -273,6 +379,52 @@ void EchoApp::drawVoiceLab() {
     if (pop::Button("Edit all effects", pop::Btn::Secondary, ImVec2(-1, 0))) openEffects(t);
     pop::EndCard();
 
+    if (hasDistortion && (pitch || tune)) {
+        ImGui::Dummy(ImVec2(0, 4.0f * sc));
+        pop::BeginCard("##distortion");
+        pop::CardTitle("Distortion");
+        distortionControls();
+        pop::EndCard();
+    }
+
+    // Hotkeys for these voices (they act on the main microphone).
+    if (target == primaryMic()) {
+        ImGui::Dummy(ImVec2(0, 4.0f * sc));
+        pop::BeginCard("##vkeys");
+        pop::CardTitle("Hotkeys");
+        HotkeySettings& h = s.hotkeys;
+        int shown = 0;
+        for (size_t i = 0; i < h.voiceKeys.size(); ++i) {
+            VoiceHotkey& vk = h.voiceKeys[i];
+            const bool related = std::any_of(vk.voices.begin(), vk.voices.end(), [&](const std::string& n) {
+                return std::find(target->voices.begin(), target->voices.end(), n) != target->voices.end();
+            });
+            if (!related && !vk.key.empty()) continue;
+            ImGui::PushID(static_cast<int>(i));
+            keyCaptureButton("vk", 100 + static_cast<int>(i), &vk.key, 140.0f);
+            ImGui::SameLine(0, 10.0f * sc);
+            ImGui::BeginGroup();
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 2.0f * sc);
+            pop::Label((std::string(voiceKeyModeName(vk.mode)) + " · " + (vk.voices.empty() ? std::string("no voices") : voicesLabel(vk.voices))).c_str());
+            pop::Hint(vk.mode == VoiceKeyMode::Hold ? "On while you hold the key" : vk.mode == VoiceKeyMode::Switch ? "Only these voices; again for your own" : "Press to add, again to take out");
+            ImGui::EndGroup();
+            ImGui::PopID();
+            ++shown;
+        }
+        if (!shown) pop::Caption(target->voices.empty() ? "Pick a voice, then give it a key to switch it on and off from a game."
+                                                        : "Give these voices a key to switch them on and off from a game.");
+        if (!target->voices.empty()) {
+            const std::string add = "Add a key for " + mixLabel;
+            if (pop::Button(add.c_str(), pop::Btn::Secondary, ImVec2(-1, 0))) {
+                h.voiceKeys.push_back(VoiceHotkey{{}, VoiceKeyMode::Toggle, target->voices});
+                autoCapture_ = 100 + static_cast<int>(h.voiceKeys.size() - 1);
+                mc_->markDirty();
+            }
+        }
+        if (pop::LinkButton("All hotkeys")) openSettings(SettingsTab::Hotkeys);
+        pop::EndCard();
+    }
+
     // Noise & echo.
     ImGui::Dummy(ImVec2(0, 4.0f * sc));
     pop::BeginCard("##noise", 0.0f, 0.0f, false, 20.0f, 8.0f);
@@ -282,9 +434,7 @@ void EchoApp::drawVoiceLab() {
     Effect* aec = findEffect(*target, echoCancellerTypeId());
     {
         bool nsOn = ns && !ns->bypass.load();
-        char desc[96];
-        std::snprintf(desc, sizeof(desc), "Fans, keyboards, hum · adds %.0f ms", ns ? ns->latencySamples() * 1000.0 / sr : 20.0);
-        if (pop::SwitchRow("Noise removal", desc, &nsOn, !(ns && nsOn))) {
+        if (pop::SwitchRow("Noise removal", "Fans, typing, mouse clicks, hum", &nsOn, !(ns && nsOn))) {
             if (ns) ns->bypass = !nsOn;
             else if (nsOn) {
                 const int pos = aec ? 1 : 0;
@@ -297,8 +447,12 @@ void EchoApp::drawVoiceLab() {
             std::snprintf(v, sizeof(v), "%.0f%%", strength);
             if (pop::SliderRow("Strength", v, "##strength", &strength, 0.0f, 100.0f, 100.0f)) ns->setParam(0, strength);
             drawCleanupStatus(*ns);
+            const int clicksIdx = ns->paramIndex("clicks");
+            bool clicks = clicksIdx >= 0 && ns->param(clicksIdx) >= 0.5f;
+            if (clicksIdx >= 0 && pop::SwitchRow("Typing & click removal", "Keyboard and mouse sounds while you're not talking", &clicks))
+                ns->setParam(clicksIdx, clicks ? 1.0f : 0.0f);
             bool gate = ns->param(2) >= 0.5f;
-            if (pop::SwitchRow("Voice gate", "Silences breathing and noise between sentences", &gate, !gate))
+            if (pop::SwitchRow("Voice gate", "Complete silence while you're not talking", &gate, !gate))
                 ns->setParam(2, gate ? 1.0f : 0.0f);
             if (gate) {
                 float thr = ns->param(3);
@@ -310,10 +464,7 @@ void EchoApp::drawVoiceLab() {
     }
     {
         bool aecOn = aec && !aec->bypass.load();
-        char desc[96];
-        std::snprintf(desc, sizeof(desc), "For speakers instead of headphones · adds %.0f ms",
-                      aec ? aec->latencySamples() * 1000.0 / sr : 16.0);
-        if (pop::SwitchRow("Speaker echo removal", desc, &aecOn, aecOn)) {
+        if (pop::SwitchRow("Speaker echo removal", "For speakers instead of headphones", &aecOn, aecOn)) {
             if (aec) aec->bypass = !aecOn;
             else if (aecOn) {
                 const uint32_t id = target->id;
@@ -346,124 +497,172 @@ void EchoApp::drawVoiceLab() {
 
 void EchoApp::drawAiPanel(StripModel& strip) {
     const Palette& p = pal();
+    const float sc = pop::S();
     auto& rt = ai::OrtRuntime::instance();
     static bool triedLoad = false;
     if (!triedLoad) {
         triedLoad = true;
-        rt.ensureLoaded(); // only loads a DLL the user installed; never downloads
+        rt.ensureLoaded(); // only loads a DLL the user installed
     }
-    ImGui::TextWrapped("AI voice conversion runs a neural voice model on this computer. It is optional and "
-                       "separate from the regular voice changer. Echo does not include or download any voice "
-                       "models: install only models you have the rights to use, and never use a voice to "
-                       "impersonate someone without their consent.");
-    ImGui::Separator();
-    // Runtime status.
-    if (rt.loaded()) {
-        ImGui::TextColored(toVec4(p.good), ICON_CHECK " ONNX Runtime %s", rt.version().c_str());
-        ImGui::SameLine();
-        std::string prov;
-        for (const auto& s : rt.providers()) prov += s + " ";
-        ImGui::TextDisabled("(%s)", prov.c_str());
-    } else {
-        ImGui::TextColored(toVec4(p.warn), ICON_WARNING " ONNX Runtime is not installed.");
-        ImGui::TextWrapped("To enable AI voices, copy onnxruntime.dll (from the official Microsoft release, MIT "
-                           "license) into the 'ai' folder next to Echo.exe, or run tools\\fetch_onnxruntime.ps1. "
-                           "See docs\\AI_VOICE.md.");
-        if (ImGui::Button(ICON_FOLDER " Open Echo's ai folder")) {
-            const std::wstring dir = paths::executableDir() + L"\\ai";
-            std::error_code ec;
-            std::filesystem::create_directories(dir, ec);
-            ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-        }
-        ImGui::SameLine();
-        if (ImGui::Button(ICON_REFRESH " Check again")) {
-            std::string err;
-            if (rt.ensureLoaded(&err)) toast("ONNX Runtime loaded", 1);
-            else toast(err, 2);
-        }
-    }
-    ImGui::Separator();
     if (!g_modelsScanned) {
         g_models = ai::scanModels(paths::modelsDir());
         g_modelsScanned = true;
     }
-    ImGui::Text("Installed voice models (%d)", static_cast<int>(g_models.size()));
-    ImGui::SameLine();
-    if (ImGui::SmallButton(ICON_REFRESH " Rescan")) g_modelsScanned = false;
-    ImGui::SameLine();
-    if (ImGui::SmallButton(ICON_FOLDER " Open models folder"))
-        ShellExecuteW(nullptr, L"open", paths::modelsDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-    Tip("Each model is a folder containing model.json and an ONNX file (see docs/AI_VOICE.md).");
-    ImGui::Checkbox("Prefer GPU (DirectML) when available", &g_preferGpu);
-    Tip("Requires a DirectML build of ONNX Runtime. Falls back to CPU automatically.");
+    std::error_code ec;
+    const bool haveEncoder = std::filesystem::exists(ai::contentVecPath(), ec);
 
+    // How to add a voice.
+    pop::Label("Add a voice");
+    pop::Caption("1. Open the voices folder.\n"
+                 "2. Make a folder for the voice and put its .pth file in it (and its .index file, if it has one).\n"
+                 "3. Click Rescan, then Use on mic.");
+    if (pop::SmallButton(ICON_FOLDER " Open the voices folder")) {
+        std::filesystem::create_directories(paths::modelsDir(), ec);
+        ShellExecuteW(nullptr, L"open", paths::modelsDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+    ImGui::SameLine();
+    if (pop::SmallButton(ICON_REFRESH " Rescan")) g_modelsScanned = false;
+    pop::Hint("Voices made with RVC or Applio work. Use only voices you have the right to use, and never to pretend to be "
+              "someone.");
+
+    // What AI voices need.
+    pop::Divider();
+    pop::Label("Needed once");
+    if (rt.loaded()) {
+        ImGui::TextColored(toVec4(p.good), ICON_CHECK " ONNX Runtime %s", rt.version().c_str());
+    } else {
+        ImGui::TextColored(toVec4(p.warn), ICON_WARNING " ONNX Runtime (Microsoft's free AI engine) is missing.");
+        pop::Caption("Run tools\\fetch_onnxruntime.ps1 from Echo's folder (add -Gpu to use the graphics card), or copy "
+                     "onnxruntime.dll into the ai folder next to Echo.exe.");
+        if (pop::SmallButton(ICON_FOLDER " Open the ai folder")) {
+            const std::wstring dir = paths::executableDir() + L"\\ai";
+            std::filesystem::create_directories(dir, ec);
+            ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        ImGui::SameLine();
+        if (pop::SmallButton(ICON_REFRESH " Check again")) {
+            std::string err;
+            if (rt.ensureLoaded(&err)) toast("ONNX Runtime found", 1);
+            else toast(err, 2);
+        }
+    }
+    const bool downloading = contentVecDownload_.valid() &&
+                             contentVecDownload_.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
+    if (contentVecDownload_.valid() && !downloading) {
+        contentVecError_ = contentVecDownload_.get();
+        if (contentVecError_.empty()) toast("ContentVec is ready", 1);
+    }
+    if (haveEncoder) {
+        ImGui::TextColored(toVec4(p.good), ICON_CHECK " ContentVec speech model");
+    } else if (downloading) {
+        const double done = contentVecProgress_.done.load() / 1048576.0, total = ai::kContentVecBytes / 1048576.0;
+        char label[64];
+        std::snprintf(label, sizeof(label), "Downloading ContentVec: %.0f of %.0f MB", done, total);
+        ImGui::ProgressBar(static_cast<float>(done / total), ImVec2(std::min(ImGui::GetContentRegionAvail().x, 420.0f * sc), 0), label);
+        ImGui::SameLine();
+        if (pop::SmallButton("Cancel")) contentVecProgress_.cancel = true;
+    } else {
+        ImGui::TextColored(toVec4(p.warn), ICON_WARNING " RVC voices need ContentVec.");
+        pop::Caption("A speech model every RVC voice uses (361 MB, MIT license, from the Applio project on Hugging Face). Echo "
+                     "checks the file before keeping it.");
+        if (!contentVecError_.empty()) ImGui::TextColored(toVec4(p.bad), "%s", contentVecError_.c_str());
+        if (pop::SmallButton("Download ContentVec")) {
+            contentVecError_.clear();
+            contentVecProgress_.cancel = false;
+            contentVecProgress_.done = 0;
+            contentVecDownload_ = std::async(std::launch::async, [this]() {
+                std::string err;
+                win::downloadFile(ai::kContentVecUrl, ai::contentVecPath(), ai::kContentVecBytes, ai::kContentVecSha256,
+                                  contentVecProgress_, &err);
+                return err;
+            });
+        }
+    }
+
+    // The voices.
+    pop::Divider();
     Effect* fx = nullptr;
     for (auto& e : strip.chain)
         if (std::string(e->typeId()) == "ai_voice") fx = e.get();
     auto* aiFx = dynamic_cast<ai::AiVoiceEffect*>(fx);
-
-    if (g_models.empty()) {
-        ImGui::TextDisabled("No models installed.");
-    } else if (ImGui::BeginTable("##models", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH)) {
-        ImGui::TableSetupColumn("Model", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("License / source", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 80 * dpi_);
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 110 * dpi_);
-        ImGui::TableHeadersRow();
-        for (const auto& m : g_models) {
-            ImGui::PushID(m.id.c_str());
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(m.name.c_str());
-            if (!m.valid) ImGui::TextColored(toVec4(p.bad), "%s", m.error.c_str());
-            else ImGui::TextDisabled("%d Hz, %d ms chunks", m.sampleRate, m.chunkMs);
-            if (!m.description.empty()) Tip(m.description.c_str());
-            ImGui::TableNextColumn();
-            ImGui::TextWrapped("%s", m.license.c_str());
-            if (!m.source.empty()) ImGui::TextDisabled("%s", m.source.c_str());
-            if (!m.consent.empty()) Tip(("Consent: " + m.consent).c_str());
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(formatBytes(m.sizeBytes).c_str());
-            ImGui::TableNextColumn();
-            ImGui::BeginDisabled(!m.valid || !rt.loaded());
-            if (ImGui::Button("Use on input")) {
-                if (!aiFx) {
-                    auto added = mc_->addEffect(ChainTarget{false, strip.id}, "ai_voice");
-                    aiFx = dynamic_cast<ai::AiVoiceEffect*>(added.get());
-                }
-                if (aiFx) {
-                    aiFx->setModel(m, g_preferGpu);
-                    toast("Loading AI model '" + m.name + "'", 0);
-                }
+    pop::Label(("Your voices (" + std::to_string(g_models.size()) + ")").c_str());
+    if (g_models.empty()) pop::Hint("None yet. Follow the steps above, then click Rescan.");
+    for (const auto& m : g_models) {
+        ImGui::PushID(m.id.c_str());
+        const float rowW = ImGui::GetContentRegionAvail().x;
+        ImGui::BeginGroup();
+        ImGui::PushFont(fonts().semibold, 0.0f);
+        ImGui::TextUnformatted(m.name.c_str());
+        ImGui::PopFont();
+        if (!m.valid) pop::TextColoredWrapped(p.bad, m.error.c_str());
+        else pop::Hint((m.description.empty() ? std::to_string(m.sampleRate / 1000) + " kHz" : m.description).c_str());
+        ImGui::EndGroup();
+        if (!m.license.empty()) Tip(("License: " + m.license + (m.consent.empty() ? "" : "\nConsent: " + m.consent)).c_str());
+        ImGui::SameLine(std::max(ImGui::GetCursorPosX(), rowW - 120.0f * sc));
+        const bool needsEncoder = m.kind == "rvc" && !haveEncoder;
+        ImGui::BeginDisabled(!m.valid || !rt.loaded() || needsEncoder);
+        if (pop::SmallButton("Use on mic")) {
+            if (!aiFx) {
+                auto added = mc_->addEffect(ChainTarget{false, strip.id}, "ai_voice");
+                aiFx = dynamic_cast<ai::AiVoiceEffect*>(added.get());
             }
-            ImGui::EndDisabled();
-            ImGui::PopID();
+            if (aiFx) {
+                // A new AI voice runs on the graphics card when Echo can use one.
+                aiFx->setModel(m, fx ? aiFx->prefersGpu() : rt.hasGpu());
+                toast("Loading '" + m.name + "'", 0);
+            }
         }
-        ImGui::EndTable();
+        ImGui::EndDisabled();
+        if (needsEncoder && m.valid) Tip("Download ContentVec first (above).");
+        ImGui::PopID();
     }
-    if (aiFx) {
-        ImGui::SeparatorText("Active AI voice");
-        const ai::AiStatus st = aiFx->status();
-        const ImU32 col = st == ai::AiStatus::Running ? p.good : st == ai::AiStatus::Error ? p.bad : p.warn;
-        ImGui::TextColored(toVec4(col), "%s", aiFx->statusText().c_str());
-        if (st == ai::AiStatus::Running) {
-            ImGui::Text("Inference %.1f ms per chunk  |  real-time factor %.2f  |  added latency %.0f ms",
-                        aiFx->inferenceMs.load(), aiFx->realtimeFactor.load(),
-                        aiFx->latencySamples() * 1000.0 / mc_->engine().sampleRate());
-            const uint64_t under = aiFx->underrunSamples.load();
-            if (under > 0)
-                ImGui::TextColored(toVec4(p.warn), "Fallbacks to dry voice: %.2f s total (raise Buffer if this keeps growing)",
-                                   under / static_cast<double>(mc_->engine().sampleRate()));
-            if (aiFx->realtimeFactor.load() > 0.9f)
-                ImGui::TextColored(toVec4(p.bad), ICON_WARNING " The model is too slow for real time on this hardware.");
-        }
-        for (int i = 0; i < aiFx->numParams(); ++i) {
-            if (i) ImGui::SameLine();
-            ParamControl(*aiFx, i);
-        }
-        bool byp = aiFx->bypass.load();
-        if (ImGui::Checkbox("Bypass AI voice (hear unprocessed voice)", &byp)) aiFx->bypass = byp;
-        if (ImGui::Button("Unload model")) aiFx->clearModel();
+
+    // The voice in use.
+    if (!aiFx) return;
+    pop::Divider();
+    pop::Label(("AI voice on " + strip.name).c_str());
+    const ai::AiStatus st = aiFx->status();
+    const ImU32 col = st == ai::AiStatus::Running ? p.good : st == ai::AiStatus::Error ? p.bad : p.warn;
+    pop::TextColoredWrapped(col, aiFx->statusText().c_str());
+    if (st == ai::AiStatus::Running) {
+        const float rtf = aiFx->realtimeFactor.load();
+        if (rtf > 0.9f)
+            pop::TextColoredWrapped(p.bad, ICON_WARNING " This voice is too heavy for this PC: parts of your plain voice will come "
+                                           "through.");
+        else if (aiFx->underrunSamples.load() > 0)
+            pop::Hint("Now and then your plain voice comes through while the PC is busy.");
+    }
+    const float w = std::min(ImGui::GetContentRegionAvail().x, 520.0f * sc);
+    float pitch = aiFx->param(0);
+    char v[32];
+    std::snprintf(v, sizeof(v), "%+.0f semitones", pitch);
+    if (pop::SliderRow("Pitch", v, "##aipitch", &pitch, -24.0f, 24.0f, 0.0f, w)) aiFx->setParam(0, std::round(pitch));
+    pop::Hint("Moves your voice up or down before the AI voice takes over. +12 suits a deep voice using a high voice.");
+    const int ix = aiFx->paramIndex("index");
+    if (ix >= 0) {
+        float match = aiFx->param(ix);
+        std::snprintf(v, sizeof(v), "%.0f%%", match);
+        if (pop::SliderRow("Voice match", v, "##aiindex", &match, 0.0f, 100.0f, 50.0f, w)) aiFx->setParam(ix, match);
+        pop::Hint("For voices with an .index file: higher sounds more like the voice, lower keeps your words clearer.");
+    }
+    float mix = aiFx->param(1);
+    std::snprintf(v, sizeof(v), "%.0f%%", mix);
+    if (pop::SliderRow("Mix", v, "##aimix", &mix, 0.0f, 100.0f, 100.0f, w)) aiFx->setParam(1, mix);
+    const int rx = aiFx->paramIndex("response");
+    if (rx >= 0 && aiFx->modelKind() == "rvc") {
+        const char* rs[] = {"Quicker", "Balanced", "Smoother"};
+        int r = static_cast<int>(std::lround(aiFx->param(rx)));
+        pop::Label("Response");
+        if (pop::Segmented("##airesponse", &r, rs, 3, w)) aiFx->setParam(rx, static_cast<float>(r));
+        pop::Hint("Quicker: you're heard sooner, but the voice can sound rougher. Smoother: cleaner, but later.");
+    }
+    if (rt.hasGpu()) {
+        bool gpu = aiFx->prefersGpu();
+        if (pop::SwitchRow("Use the graphics card", "Faster, so you're heard sooner", &gpu, false)) aiFx->setPreferGpu(gpu);
+    }
+    if (pop::SmallButton("Remove the AI voice")) {
+        const uint32_t id = fx->instanceId;
+        defer([this, t = ChainTarget{false, strip.id}, id]() { mc_->removeEffect(t, id); });
     }
 }
 

@@ -20,8 +20,16 @@
 //   echo_hwtest denoise [sec]     capture the default microphone through the engine with noise
 //                                 suppression in the strip chain; reports room-noise reduction,
 //                                 voice activity, CPU and latency. Audio stays in memory only.
+//   echo_hwtest voice [name] [sec]  a voice preset (default Pain) in real time: a tone through its
+//                                 effects -> cable -> recording side; level and distortion against
+//                                 the offline result, peak, glitches, clicks when switching it
+//                                 off and on. Audio stays in memory only.
+//   echo_hwtest soundboard        built-in sounds through the soundboard input -> cable ->
+//                                 recording side: level, shape, latency, glitches (memory only)
 //   echo_hwtest hotkeys           push to talk / mute keys through Windows' real key state:
-//                                 presses F24 and F23 with SendInput (keys no app uses)
+//                                 presses F24, F23 and F22 (instant taps) with SendInput (keys no app uses)
+//   echo_hwtest vbcable-download <folder>  download, check and unpack VB-Audio's VB-CABLE pack as the
+//                                 app's Install button does (doesn't open the installer)
 //   echo_hwtest all               run everything above (playback is audible, -40 dBFS)
 #include <windows.h>
 #include <audiopolicy.h>
@@ -30,26 +38,43 @@
 #include <atomic>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "ai/ContentVec.h"
+#include "ai/FaissIndex.h"
+#include "ai/OnnxGraph.h"
+#include "ai/AiVoiceEffect.h"
+#include "ai/OrtSession.h"
+#include "ai/RvcVoice.h"
+#include "ai/RvcModel.h"
+#include "ai/TorchFile.h"
 #include "audio/AppRouting.h"
+#include "audio/Download.h"
 #include "audio/HotkeyService.h"
+#include "audio/VbCable.h"
 #include "audio/AppSessions.h"
+#include "audio/AudioDecoder.h"
 #include "audio/DeviceManager.h"
 #include "audio/VirtualCables.h"
 #include "audio/WasapiStream.h"
 #include "core/Engine.h"
 #include "core/Log.h"
+#include "core/Resampler.h"
 #include "core/Text.h"
+#include "core/WavFile.h"
 #include "dsp/EffectRegistry.h"
 #include "dsp/NoiseSuppressorInfo.h"
+#include "core/SoundboardSource.h"
 #include "session/Presets.h"
+#include "session/Soundboard.h"
 
 using namespace echo;
 using namespace echo::win;
@@ -537,6 +562,187 @@ void cmdVirtualMic(DeviceManager& dm) {
                     cap->stats.discontinuities.load() == 0 && steadyGapMs <= g_vmSeconds;
     result("virtual microphone (engine -> cable -> recording app)", ok ? 1 : -1, buf);
     measureChirpLatency("Echo output -> virtual mic recording side", *tone, *mem, 48000.0);
+}
+
+// A voice preset in real time: Echo plays a 300 Hz tone (-18 dBFS) through
+// the preset's effect chain into the virtual cable's playback side and
+// records the recording side (what Discord/OBS receive), with the voice
+// switched off and on again near the end. Compares level and distortion with
+// the same chain run offline, and checks the peak, glitch counters and the
+// switches for clicks. Not audible; the audio stays in memory.
+void cmdVoice(DeviceManager& dm, const std::string& presetName, double seconds) {
+    const std::string what = "voice '" + presetName + "' through the virtual microphone";
+    const auto presets = factoryChainPresets();
+    const ChainPreset* preset = nullptr;
+    for (const auto& p : presets)
+        if (p.name == presetName) preset = &p;
+    if (!preset) {
+        result(what.c_str(), -1, "no factory voice with that name");
+        return;
+    }
+    const auto pairs = findCablePairs(dm.devices());
+    const CablePair* pair = nullptr;
+    for (const auto& p : pairs)
+        if (!p.secondary) {
+            pair = &p;
+            break;
+        }
+    if (!pair) {
+        result(what.c_str(), 0, "no virtual cable installed");
+        return;
+    }
+    std::string err;
+    StreamOptions ro;
+    ro.deviceId = fromUtf8(pair->renderId);
+    ro.label = pair->renderName;
+    auto ren = WasapiRender::open(ro, &err);
+    StreamOptions co;
+    co.deviceId = fromUtf8(pair->captureId);
+    co.label = pair->captureName;
+    auto cap = ren ? WasapiCapture::open(co, &err) : nullptr;
+    if (!ren || !cap) {
+        result(what.c_str(), -1, err);
+        return;
+    }
+    constexpr double kSr = 48000.0, kFreq = 300.0;
+    constexpr float kLevel = -18.0f;
+    auto makeChain = [&] {
+        auto c = chainFromJson(preset->chain, nullptr);
+        for (auto& e : c) e->prepare(kSr, 480);
+        return c;
+    };
+
+    // Expected result: the same chain offline on the same tone.
+    double expRms = 0.0, expThd = 0.0;
+    {
+        auto c = makeChain();
+        ChainSnap snap;
+        for (auto& e : c) snap.fx[snap.count++] = e.get();
+        ChainRunner runner;
+        runner.prepare(480);
+        std::vector<float> x(size_t(kSr * 2)), r(480);
+        for (size_t i = 0; i < x.size(); ++i) x[i] = dbToGain(kLevel) * float(std::sin(2 * kPiD * kFreq * i / kSr));
+        for (size_t pos = 0; pos < x.size(); pos += 480) {
+            bool mono = true;
+            runner.process(snap, x.data() + pos, r.data(), mono, 480);
+        }
+        const size_t a = x.size() - 9600;
+        double e = 0;
+        for (size_t i = a; i < x.size(); ++i) e += double(x[i]) * x[i];
+        expRms = std::sqrt(e / 9600);
+        const double fund = goertzel(x, a, 9600, kFreq, kSr), total = std::sqrt(2.0) * expRms;
+        expThd = std::sqrt(std::max(0.0, total * total - fund * fund)) / std::max(fund, 1e-9);
+    }
+
+    EngineRig rig(int(kSr), 480);
+    auto chain = makeChain();
+    for (auto& e : chain) rig.keep.push_back(e);
+    auto tone = std::make_shared<ToneSource>();
+    tone->wave = ToneSource::Sine;
+    tone->frequency = float(kFreq);
+    tone->levelDb = kLevel;
+    const int sTone = rig.addSource(tone);
+    const int sCable = rig.addSource(std::make_shared<DeviceCaptureSource>(cap));
+    StripRuntime* voice = rig.addStrip(sTone);
+    StripRuntime* appStrip = rig.addStrip(sCable);
+    voice->chanCount = 1; // like a microphone
+    for (auto& e : chain) rig.g->strips[0].chain.fx[rig.g->strips[0].chain.count++] = e.get();
+    std::shared_ptr<WasapiRender> phones;
+    if (const std::string phonesId = dm.defaultDeviceId(Flow::Render); !phonesId.empty()) {
+        StreamOptions po;
+        po.deviceId = fromUtf8(phonesId);
+        po.label = "default output (clock, silent)";
+        phones = WasapiRender::open(po, &err);
+    }
+    auto devSink = std::make_shared<DeviceRenderSink>(ren);
+    const int kDev = rig.addSink(devSink);
+    if (phones) {
+        auto clockSink = std::make_shared<DeviceRenderSink>(phones);
+        const int kClock = rig.addSink(clockSink);
+        clockSink->setMaster(true, rig.engine.wakeTarget());
+        rig.g->masterSink = kClock;
+    } else {
+        devSink->setMaster(true, rig.engine.wakeTarget());
+        rig.g->masterSink = kDev;
+    }
+    auto mem = std::make_shared<MemorySink>(size_t(kSr * (seconds + 2)));
+    const int kMem = rig.addSink(mem);
+    rig.addBus(kDev);
+    rig.addBus(kMem);
+    voice->sends[0].enabled = true;
+    appStrip->sends[1].enabled = true;
+    rig.go();
+    const double tOff = seconds - 4.0, tOn = seconds - 2.0;
+    std::printf("Echo plays a %.0f dBFS %.0f Hz tone through '%s' into '%s' and records '%s' for %.0f s; the voice is "
+                "switched off at %.0f s and on again at %.0f s (not audible)...\n",
+                kLevel, kFreq, presetName.c_str(), pair->renderName.c_str(), pair->captureName.c_str(), seconds, tOff, tOn);
+    auto setOn = [&](bool on) {
+        for (auto& e : chain)
+            if (std::string(e->typeId()) != "bitcrusher") e->bypass = !on; // the optional stage stays as it is
+    };
+    std::this_thread::sleep_for(std::chrono::milliseconds(int(tOff * 1000)));
+    setOn(false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    setOn(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    rig.engine.stop();
+    float cpu = 0.0f;
+    for (auto& e : chain) cpu += e->cpuLoad.load();
+
+    const auto& d = mem->leftData();
+    const size_t n = std::min(mem->written(), d.size());
+    auto at = [&](double t) { return std::min(n, size_t(t * kSr)); };
+    auto rmsOf = [&](double a, double b) {
+        double e = 0;
+        for (size_t i = at(a); i < at(b); ++i) e += double(d[i]) * d[i];
+        return std::sqrt(e / std::max<size_t>(1, at(b) - at(a)));
+    };
+    auto thdOf = [&](double a) {
+        double e = 0;
+        for (size_t i = at(a); i < at(a) + 9600 && i < n; ++i) e += double(d[i]) * d[i];
+        const double fund = goertzel(d, at(a), 9600, kFreq, kSr), total = std::sqrt(2.0 * e / 9600);
+        return std::sqrt(std::max(0.0, total * total - fund * fund)) / std::max(fund, 1e-9);
+    };
+    auto stepOf = [&](double a, double b) {
+        float m = 0;
+        for (size_t i = std::max<size_t>(at(a), 1); i < at(b); ++i) m = std::max(m, std::fabs(d[i] - d[i - 1]));
+        return m;
+    };
+    float pk = 0;
+    for (size_t i = at(0.5); i < n; ++i) pk = std::max(pk, std::fabs(d[i]));
+    // Windows on the recording side's timeline (the cable adds some tens of ms).
+    const double onRms = rmsOf(tOff - 2.5, tOff - 0.5), offRms = rmsOf(tOff + 0.5, tOn - 0.3);
+    // Median of five 0.2 s windows per segment (the cable itself has an
+    // occasional short step that would spoil a single window).
+    struct Spread { double med, lo, hi; };
+    auto thdSpread = [&](double a) {
+        std::vector<double> v;
+        for (int k = 0; k < 5; ++k) v.push_back(thdOf(a + 0.25 * k));
+        std::sort(v.begin(), v.end());
+        return Spread{v[2], v[0], v[4]};
+    };
+    const Spread on = thdSpread(tOff - 2.4), offS = thdSpread(tOff + 0.4), again = thdSpread(tOn + 0.4);
+    const double onThd = on.med, offThd = offS.med, againThd = again.med;
+    std::printf("  distortion per 0.2 s window: voice on %.1f..%.1f %%, off %.1f..%.1f %%, on again %.1f..%.1f %%\n",
+                on.lo * 100, on.hi * 100, offS.lo * 100, offS.hi * 100, again.lo * 100, again.hi * 100);
+    const float steadyStep = std::max(stepOf(tOff - 2.5, tOff - 0.5), stepOf(tOff + 0.5, tOn - 0.3));
+    const float switchStep = std::max(stepOf(tOff - 0.3, tOff + 0.5), stepOf(tOn - 0.3, tOn + 0.5));
+    char buf[900];
+    std::snprintf(buf, sizeof(buf),
+                  "'%s' received %.1f dBFS RMS (offline %.1f), distortion %.0f%% (offline %.0f%%; voice off %.1f%%, on "
+                  "again %.0f%%), voice off %.1f dBFS RMS; peak %.2f dBFS; largest sample step %.3f steady, %.3f around "
+                  "the switches; CPU %.2f%% of one core; Echo render underruns %llu, recording-side discontinuities %llu",
+                  pair->captureName.c_str(), gainToDb(float(onRms)), gainToDb(float(expRms)), onThd * 100, expThd * 100,
+                  offThd * 100, againThd * 100, gainToDb(float(offRms)), gainToDb(pk), steadyStep, switchStep, cpu * 100.0f,
+                  (unsigned long long)ren->stats.underruns.load(), (unsigned long long)cap->stats.discontinuities.load());
+    // Voice off is a sanity check that the distortion comes from the voice:
+    // the plain tone through the cable path measures 1.5-6 % here, varying
+    // from run to run (drift-correction resampling on both sides).
+    const bool ok = n >= at(seconds - 0.5) && std::fabs(gainToDb(float(onRms)) - gainToDb(float(expRms))) < 1.5 &&
+                    std::fabs(onThd - expThd) < 0.1 && std::fabs(againThd - expThd) < 0.1 && offThd < 0.1 &&
+                    switchStep <= steadyStep * 1.25f && ren->stats.underruns.load() == 0 &&
+                    cap->stats.discontinuities.load() == 0;
+    result(what.c_str(), ok ? 1 : -1, buf);
 }
 
 // App capture under load, like capturing Chrome while a game runs: this
@@ -1094,6 +1300,467 @@ int exportPresets(const std::wstring& dir) {
     return 0;
 }
 
+// Downloads the ContentVec model the way Echo's button does (to `dest`) and
+// reports progress, speed and the checksum result.
+int contentVecDownload(const std::wstring& dest) {
+    win::DownloadProgress prog;
+    std::string err;
+    bool ok = false;
+    const double t0 = monotonicSeconds();
+    std::thread t([&]() { ok = win::downloadFile(ai::kContentVecUrl, dest, ai::kContentVecBytes, ai::kContentVecSha256, prog, &err); });
+    while (prog.done.load() < ai::kContentVecBytes && t.joinable()) {
+        Sleep(1000);
+        std::printf("  %.0f / %.0f MB\n", prog.done.load() / 1048576.0, ai::kContentVecBytes / 1048576.0);
+        if (monotonicSeconds() - t0 > 900.0) prog.cancel = true;
+        if (prog.done.load() >= ai::kContentVecBytes) break;
+    }
+    t.join();
+    std::printf("%s in %.1f s%s%s\n", ok ? "downloaded and verified" : "failed", monotonicSeconds() - t0, ok ? "" : ": ", ok ? "" : err.c_str());
+    return ok ? 0 : 1;
+}
+
+// Downloads, checks and unpacks VB-Audio's VB-CABLE pack as the app does,
+// without opening the installer.
+int vbCableDownload(const std::wstring& folder) {
+    win::DownloadProgress prog;
+    std::string err;
+    std::wstring setup;
+    const double t0 = monotonicSeconds();
+    const bool ok = win::prepareVbCable(folder, prog, &setup, &err);
+    const std::string detail = ok ? wideToUtf8(setup) : err;
+    std::printf("%s in %.1f s: %s\n", ok ? "downloaded, verified and unpacked" : "failed", monotonicSeconds() - t0, detail.c_str());
+    return ok ? 0 : 1;
+}
+
+// Converts a whole WAV in one piece (RVC's offline way) with Echo's RVC
+// pipeline, for comparison with the real-time result. Output at 48 kHz.
+int rvcOffline(const std::wstring& modelDir, const std::wstring& inWav, const std::wstring& outWav, float pitch, float index,
+               unsigned seed) {
+    WavData w;
+    std::string err;
+    if (!readWav(inWav, w, &err)) {
+        std::printf("can't read the input\n");
+        return 1;
+    }
+    std::vector<float> x(w.samples.size() / w.channels);
+    for (size_t i = 0; i < x.size(); ++i) x[i] = w.samples[i * w.channels];
+    ai::ModelManifest m;
+    if (!ai::loadManifest(modelDir, m)) {
+        std::printf("model: %s\n", m.error.c_str());
+        return 1;
+    }
+    std::vector<float> xs = resampleOffline(x, 1, w.sampleRate, m.sampleRate);
+    ai::RvcVoice voice;
+    voice.seed(seed);
+    if (!voice.load(m, false, static_cast<int>(xs.size()), &err)) {
+        std::printf("load: %s\n", err.c_str());
+        return 1;
+    }
+    voice.setIndexRate(index / 100.0f);
+    std::vector<float> y;
+    const double t0 = monotonicSeconds();
+    if (!voice.run(xs.data(), static_cast<int>(xs.size()), pitch, y, &err)) {
+        std::printf("run: %s\n", err.c_str());
+        return 1;
+    }
+    std::printf("%.1f s in one piece: %.0f ms\n", xs.size() / static_cast<double>(m.sampleRate), (monotonicSeconds() - t0) * 1000.0);
+    std::vector<float> out = resampleOffline(y, 1, m.sampleRate, 48000.0);
+    WavWriter ww;
+    if (!ww.open(outWav, 48000, 1, 16) || !ww.write(out.data(), out.size())) return 1;
+    ww.close();
+    return 0;
+}
+
+// Converts a WAV through the AI voice effect exactly as in real time
+// (48 kHz, 10 ms blocks at real-time pace) and writes the result.
+// response: 0 Quicker, 1 Balanced, 2 Smoother; gpu: DirectML if available.
+int rvcConvert(const std::wstring& modelDir, const std::wstring& inWav, const std::wstring& outWav, float pitch, float index,
+               int response, bool gpu) {
+    WavData w;
+    std::string err;
+    if (!readWav(inWav, w, &err) || w.channels < 1) {
+        std::printf("can't read %s: %s\n", wideToUtf8(inWav).c_str(), err.c_str());
+        return 1;
+    }
+    std::vector<float> x(w.samples.size() / w.channels);
+    for (size_t i = 0; i < x.size(); ++i) x[i] = w.samples[i * w.channels];
+    if (w.sampleRate != 48000) x = resampleOffline(x, 1, w.sampleRate, 48000.0);
+    ai::ModelManifest m;
+    if (!ai::loadManifest(modelDir, m)) {
+        std::printf("model: %s\n", m.error.c_str());
+        return 1;
+    }
+    auto fx = EffectRegistry::instance().create("ai_voice");
+    auto* ai = dynamic_cast<ai::AiVoiceEffect*>(fx.get());
+    if (!ai) return 1;
+    fx->prepare(48000.0, 480);
+    fx->setParam("pitch", pitch);
+    fx->setParam("index", index);
+    fx->setParam("response", static_cast<float>(response));
+    std::printf("response: %s\n", response == 0 ? "Quicker" : response == 2 ? "Smoother" : "Balanced");
+    const double t0 = monotonicSeconds();
+    ai->setModel(m, gpu);
+    while (ai->status() == ai::AiStatus::Loading && monotonicSeconds() - t0 < 120.0) Sleep(20);
+    std::printf("%s (%.1f s to load)\n", ai->statusText().c_str(), monotonicSeconds() - t0);
+    if (ai->status() != ai::AiStatus::Running) return 1;
+    std::vector<float> y(x.size() + 48000 * 3, 0.0f); // room for the effect's delay
+    std::copy(x.begin(), x.end(), y.begin());
+    const double t1 = monotonicSeconds();
+    for (size_t pos = 0; pos + 480 <= y.size(); pos += 480) {
+        float* ch[2] = {y.data() + pos, nullptr};
+        fx->process(ch, 1, 480);
+        // Real-time pace: one 10 ms block per 10 ms.
+        const double due = t1 + (pos / 480 + 1) * 0.010;
+        while (monotonicSeconds() < due) Sleep(1);
+    }
+    const int lat = fx->latencySamples();
+    std::vector<float> out(y.begin() + lat, y.begin() + lat + static_cast<long>(x.size()));
+    WavWriter ww;
+    if (!ww.open(outWav, 48000, 1, 16) || !ww.write(out.data(), out.size())) {
+        std::printf("can't write the output\n");
+        return 1;
+    }
+    ww.close();
+    std::printf("%.1f s converted; latency %.0f ms; inference %.1f ms per block (real-time factor %.2f); fallbacks to dry %.2f s, "
+                "skipped %.2f s\n",
+                x.size() / 48000.0, lat / 48.0, ai->inferenceMs.load(), ai->realtimeFactor.load(), ai->underrunSamples.load() / 48000.0,
+                ai->skippedSamples.load() / 48000.0);
+    return 0;
+}
+
+// Loads an RVC .index and times retrieval for a few queries (its own
+// vectors must come back as themselves).
+// Tries each kind of operator Echo's RVC graphs use, alone, on the graphics
+// card (DirectML), and prints which ones it accepts.
+int dmlProbe() {
+    using ai::OnnxGraph;
+    using ai::OnnxType;
+    struct Case {
+        const char* name;
+        std::function<void(OnnxGraph&)> build; // input "x" [1,8,64] float -> output "y"
+    };
+    const std::vector<Case> cases = {
+        {"Slice reversed", [](OnnxGraph& g) { g.output(g.op("Slice", {"x", g.ints({-1}), g.ints({-std::numeric_limits<int64_t>::max()}), g.ints({-1}), g.ints({-1})}), "y", OnnxType::Float, {1, 8, 64}); }},
+        {"Slice", [](OnnxGraph& g) { g.output(g.op("Slice", {"x", g.ints({0, 63}), g.ints({7, 64}), g.ints({1, 2})}), "y", OnnxType::Float, {1, 7, 1}); }},
+        {"Mod fmod", [](OnnxGraph& g) { g.output(g.op("Mod", {"x", g.scalar(1.0f)}, {ai::attrInt("fmod", 1)}), "y", OnnxType::Float, {1, 8, 64}); }},
+        {"CumSum", [](OnnxGraph& g) { g.output(g.op("CumSum", {"x", g.constantInt64({}, {1})}), "y", OnnxType::Float, {1, 8, 64}); }},
+        {"Pad", [](OnnxGraph& g) { g.output(g.op("Pad", {"x", g.ints({0, 1, 0, 0, 0, 0})}), "y", OnnxType::Float, {1, 9, 64}); }},
+        {"Greater+Cast", [](OnnxGraph& g) { g.output(g.op("Cast", {g.op("Greater", {"x", g.scalar(0.0f)})}, {ai::attrInt("to", 1)}), "y", OnnxType::Float, {1, 8, 64}); }},
+        {"Expand", [](OnnxGraph& g) { g.output(g.op("Expand", {g.op("Slice", {"x", g.ints({0}), g.ints({1}), g.ints({2})}), g.ints({1, 8, 64})}), "y", OnnxType::Float, {1, 8, 64}); }},
+        {"ConvTranspose", [](OnnxGraph& g) {
+             std::vector<float> w(8 * 4 * 20, 0.01f), b(4, 0.0f);
+             g.output(g.op("ConvTranspose", {"x", g.constant({8, 4, 20}, w), g.constant({4}, b)},
+                           {ai::attrInts("kernel_shape", {20}), ai::attrInts("strides", {10}), ai::attrInts("pads", {5, 5}),
+                            ai::attrInts("output_padding", {0})}),
+                      "y", OnnxType::Float, {1, 4, 640});
+         }},
+        {"ConvTranspose odd", [](OnnxGraph& g) {
+             std::vector<float> w(8 * 4 * 3, 0.01f), b(4, 0.0f);
+             g.output(g.op("ConvTranspose", {"x", g.constant({8, 4, 3}, w), g.constant({4}, b)},
+                           {ai::attrInts("kernel_shape", {3}), ai::attrInts("strides", {3}), ai::attrInts("pads", {2, 2}),
+                            ai::attrInts("output_padding", {1})}),
+                      "y", OnnxType::Float, {1, 4, 189});
+         }},
+        {"ConvTranspose plain", [](OnnxGraph& g) {
+             std::vector<float> w(8 * 4 * 20, 0.01f), b(4, 0.0f);
+             g.output(g.op("ConvTranspose", {"x", g.constant({8, 4, 20}, w), g.constant({4}, b)},
+                           {ai::attrInts("kernel_shape", {20}), ai::attrInts("strides", {10}), ai::attrInts("pads", {5, 5})}),
+                      "y", OnnxType::Float, {1, 4, 640});
+         }},
+        {"ConvTranspose all attrs", [](OnnxGraph& g) {
+             std::vector<float> w(8 * 4 * 20, 0.01f), b(4, 0.0f);
+             g.output(g.op("ConvTranspose", {"x", g.constant({8, 4, 20}, w), g.constant({4}, b)},
+                           {ai::attrInts("kernel_shape", {20}), ai::attrInts("strides", {10}), ai::attrInts("pads", {5, 5}),
+                            ai::attrInts("dilations", {1}), ai::attrInt("group", 1), ai::attrInts("output_padding", {0})}),
+                      "y", OnnxType::Float, {1, 4, 640});
+         }},
+        {"ConvTranspose 2-D", [](OnnxGraph& g) {
+             std::vector<float> w(8 * 4 * 20, 0.01f), b(4, 0.0f);
+             const std::string x4 = g.op("Unsqueeze", {"x", g.ints({2})});
+             const std::string y4 = g.op("ConvTranspose", {x4, g.constant({8, 4, 1, 20}, w), g.constant({4}, b)},
+                                         {ai::attrInts("kernel_shape", {1, 20}), ai::attrInts("strides", {1, 10}),
+                                          ai::attrInts("pads", {0, 5, 0, 5}), ai::attrInts("output_padding", {0, 0})});
+             g.output(g.op("Squeeze", {y4, g.ints({2})}), "y", OnnxType::Float, {1, 4, 640});
+         }},
+        {"ConvTranspose odd 2-D", [](OnnxGraph& g) {
+             std::vector<float> w(8 * 4 * 3, 0.01f), b(4, 0.0f);
+             const std::string x4 = g.op("Unsqueeze", {"x", g.ints({2})});
+             const std::string y4 = g.op("ConvTranspose", {x4, g.constant({8, 4, 1, 3}, w), g.constant({4}, b)},
+                                         {ai::attrInts("kernel_shape", {1, 3}), ai::attrInts("strides", {1, 3}),
+                                          ai::attrInts("pads", {0, 2, 0, 2}), ai::attrInts("output_padding", {0, 1})});
+             g.output(g.op("Squeeze", {y4, g.ints({2})}), "y", OnnxType::Float, {1, 4, 189});
+         }},
+        {"ConvTranspose no bias", [](OnnxGraph& g) {
+             std::vector<float> w(8 * 4 * 20, 0.01f);
+             g.output(g.op("ConvTranspose", {"x", g.constant({8, 4, 20}, w)},
+                           {ai::attrInts("kernel_shape", {20}), ai::attrInts("strides", {10}), ai::attrInts("pads", {5, 5})}),
+                      "y", OnnxType::Float, {1, 4, 640});
+         }},
+        {"Conv dilated", [](OnnxGraph& g) {
+             std::vector<float> w(8 * 8 * 3, 0.01f), b(8, 0.0f);
+             g.output(g.op("Conv", {"x", g.constant({8, 8, 3}, w), g.constant({8}, b)},
+                           {ai::attrInts("kernel_shape", {3}), ai::attrInts("pads", {5, 5}), ai::attrInts("dilations", {5}),
+                            ai::attrInts("strides", {1})}),
+                      "y", OnnxType::Float, {1, 8, 64});
+         }},
+        {"Conv strided", [](OnnxGraph& g) {
+             std::vector<float> w(8 * 8 * 16, 0.01f), b(8, 0.0f);
+             g.output(g.op("Conv", {"x", g.constant({8, 8, 16}, w), g.constant({8}, b)},
+                           {ai::attrInts("kernel_shape", {16}), ai::attrInts("pads", {4, 4}), ai::attrInts("dilations", {1}),
+                            ai::attrInts("strides", {8})}),
+                      "y", OnnxType::Float, {1, 8, 8});
+         }},
+        {"GatherElements", [](OnnxGraph& g) {
+             std::vector<int64_t> idx(1 * 8 * 64);
+             for (size_t i = 0; i < idx.size(); ++i) idx[i] = static_cast<int64_t>(i % 64);
+             g.output(g.op("GatherElements", {"x", g.constantInt64({1, 8, 64}, idx)}, {ai::attrInt("axis", 2)}), "y", OnnxType::Float, {1, 8, 64});
+         }},
+        {"LayerNormalization", [](OnnxGraph& g) {
+             g.output(g.op("LayerNormalization", {"x", g.constant({64}, std::vector<float>(64, 1.0f)), g.constant({64}, std::vector<float>(64, 0.0f))},
+                           {ai::attrInt("axis", -1), ai::attrFloat("epsilon", 1e-5f)}),
+                      "y", OnnxType::Float, {1, 8, 64});
+         }},
+        {"Split", [](OnnxGraph& g) { g.output(g.opN("Split", {"x", g.ints({4, 4})}, 2, {ai::attrInt("axis", 1)})[0], "y", OnnxType::Float, {1, 4, 64}); }},
+        {"Gather", [](OnnxGraph& g) { g.output(g.op("Gather", {g.constant({4, 64}, std::vector<float>(256, 1.0f)), g.constantInt64({1, 8}, {0, 1, 2, 3, 0, 1, 2, 3})}, {ai::attrInt("axis", 0)}), "y", OnnxType::Float, {1, 8, 64}); }},
+        {"Sin", [](OnnxGraph& g) { g.output(g.op("Sin", {"x"}), "y", OnnxType::Float, {1, 8, 64}); }},
+        {"Erf", [](OnnxGraph& g) { g.output(g.op("Erf", {"x"}), "y", OnnxType::Float, {1, 8, 64}); }},
+        {"InstanceNormalization", [](OnnxGraph& g) {
+             g.output(g.op("InstanceNormalization", {"x", g.constant({8}, std::vector<float>(8, 1.0f)), g.constant({8}, std::vector<float>(8, 0.0f))},
+                           {ai::attrFloat("epsilon", 1e-5f)}),
+                      "y", OnnxType::Float, {1, 8, 64});
+         }},
+        {"Softmax", [](OnnxGraph& g) { g.output(g.op("Softmax", {"x"}, {ai::attrInt("axis", -1)}), "y", OnnxType::Float, {1, 8, 64}); }},
+        {"Exp+Sigmoid+Tanh+Relu", [](OnnxGraph& g) { g.output(g.op("Relu", {g.op("Tanh", {g.op("Sigmoid", {g.op("Exp", {"x"})})})}), "y", OnnxType::Float, {1, 8, 64}); }},
+    };
+    std::vector<float> x(8 * 64);
+    for (size_t i = 0; i < x.size(); ++i) x[i] = 0.01f * static_cast<float>(i % 37) - 0.15f;
+    int failed = 0;
+    for (const auto& c : cases) {
+        OnnxGraph g;
+        g.input("x", OnnxType::Float, {1, 8, 64});
+        c.build(g);
+        const std::vector<uint8_t> bytes = g.serialize();
+        ai::OrtGraphSession s;
+        std::string err;
+        bool ok = s.create(bytes, true, 1, &err);
+        std::vector<std::vector<float>> out;
+        if (ok) ok = s.run({{"x", OnnxType::Float, {1, 8, 64}, x.data()}}, {"y"}, out, &err);
+        std::printf("%-24s %s %s\n", c.name, ok ? "ok  " : "FAIL", ok ? s.provider().c_str() : err.substr(0, 160).c_str());
+        failed += ok ? 0 : 1;
+    }
+    return failed == 0 ? 0 : 1;
+}
+
+int faissInfo(const std::wstring& path) {
+    ai::FaissIndex idx;
+    std::string err;
+    const double t0 = monotonicSeconds();
+    if (!idx.load(path, &err)) {
+        std::printf("load failed: %s\n", err.c_str());
+        return 1;
+    }
+    const double t1 = monotonicSeconds();
+    std::printf("index: %d dims, %lld vectors, loaded in %.0f ms\n", idx.dim(), static_cast<long long>(idx.size()), (t1 - t0) * 1000.0);
+    std::vector<float> q(static_cast<size_t>(idx.dim())), out(q.size());
+    uint32_t seed = 1;
+    auto rnd = [&]() {
+        seed = seed * 1664525u + 1013904223u;
+        return (static_cast<float>(seed >> 8) / 16777216.0f - 0.5f) * 0.4f;
+    };
+    const double t2 = monotonicSeconds();
+    for (int i = 0; i < 50; ++i) {
+        for (float& v : q) v = rnd();
+        idx.retrieve(q.data(), 8, out.data());
+    }
+    const double t3 = monotonicSeconds();
+    std::printf("retrieval: %.2f ms per frame\n", (t3 - t2) * 1000.0 / 50.0);
+    return 0;
+}
+
+// Runs ContentVec (pytorch_model.bin) through Echo's ONNX graph on
+// audio16k.bin in `dir` and writes echo_feats.bin (for comparison).
+int contentVecRun(const std::wstring& bin, const std::wstring& dir, int layer) {
+    std::vector<float> audio;
+    {
+        FILE* f = _wfopen((dir + L"\\audio16k.bin").c_str(), L"rb");
+        if (!f) {
+            std::printf("missing audio16k.bin\n");
+            return 1;
+        }
+        _fseeki64(f, 0, SEEK_END);
+        audio.resize(static_cast<size_t>(_ftelli64(f)) / 4);
+        _fseeki64(f, 0, SEEK_SET);
+        std::fread(audio.data(), 4, audio.size(), f);
+        std::fclose(f);
+    }
+    ai::ContentVecModel cv;
+    std::string err;
+    const double t0 = monotonicSeconds();
+    if (!cv.load(bin, &err)) {
+        std::printf("load failed: %s\n", err.c_str());
+        return 1;
+    }
+    std::vector<uint8_t> onnx;
+    const int n = static_cast<int>(audio.size());
+    if (!cv.buildGraph(n, layer, false, onnx, &err)) {
+        std::printf("build failed: %s\n", err.c_str());
+        return 1;
+    }
+    const double t1 = monotonicSeconds();
+    ai::OrtGraphSession session;
+    if (!session.create(onnx, false, 0, &err)) {
+        std::printf("session failed: %s\n", err.c_str());
+        return 1;
+    }
+    const double t2 = monotonicSeconds();
+    std::vector<std::vector<float>> out;
+    std::vector<ai::OrtGraphSession::Input> in = {{"audio", ai::OnnxType::Float, {1, n}, audio.data()}};
+    if (!session.run(in, {"features"}, out, &err)) {
+        std::printf("run failed: %s\n", err.c_str());
+        return 1;
+    }
+    const double t3 = monotonicSeconds();
+    for (int r = 0; r < 3; ++r) session.run(in, {"features"}, out, &err);
+    const double t4 = monotonicSeconds();
+    FILE* f = _wfopen((dir + L"\\echo_feats.bin").c_str(), L"wb");
+    if (f) {
+        std::fwrite(out[0].data(), 4, out[0].size(), f);
+        std::fclose(f);
+    }
+    std::printf("%d samples -> %d frames: load+graph %.0f ms (%zu bytes), session %.0f ms, first run %.0f ms, then %.0f ms\n", n,
+                ai::ContentVecModel::framesFor(n), (t1 - t0) * 1000.0, onnx.size(), (t2 - t1) * 1000.0, (t3 - t2) * 1000.0,
+                (t4 - t3) * 1000.0 / 3.0);
+    return 0;
+}
+
+// Runs an RVC voice (.pth) through Echo's ONNX graph on inputs saved by a
+// test script (phone/pitch/pitchf/rnd/noise .bin in `dir`), writes
+// echo_out.bin and the graph (echo_rvc.onnx) for comparison with PyTorch.
+int rvcRun(const std::wstring& pth, const std::wstring& dir) {
+    auto readFile = [](const std::wstring& path, std::vector<uint8_t>& out) {
+        FILE* f = _wfopen(path.c_str(), L"rb");
+        if (!f) return false;
+        _fseeki64(f, 0, SEEK_END);
+        out.resize(static_cast<size_t>(_ftelli64(f)));
+        _fseeki64(f, 0, SEEK_SET);
+        const bool ok = std::fread(out.data(), 1, out.size(), f) == out.size();
+        std::fclose(f);
+        return ok;
+    };
+    auto writeFile = [](const std::wstring& path, const void* data, size_t n) {
+        FILE* f = _wfopen(path.c_str(), L"wb");
+        if (!f) return false;
+        const bool ok = std::fwrite(data, 1, n, f) == n;
+        std::fclose(f);
+        return ok;
+    };
+    ai::RvcModel model;
+    std::string err;
+    if (!model.load(pth, &err)) {
+        std::printf("load failed: %s\n", err.c_str());
+        return 1;
+    }
+    const ai::RvcInfo& I = model.info();
+    std::printf("RVC %s, %d Hz, emb %d, hop %d, vocoder %s\n", I.version.c_str(), I.sampleRate, I.embDim, I.hop, I.vocoder.c_str());
+    std::vector<uint8_t> phone, pitch, pitchf, rnd, noise;
+    if (!readFile(dir + L"\\phone.bin", phone) || !readFile(dir + L"\\pitch.bin", pitch) || !readFile(dir + L"\\pitchf.bin", pitchf) ||
+        !readFile(dir + L"\\rnd.bin", rnd) || !readFile(dir + L"\\noise.bin", noise)) {
+        std::printf("missing input files\n");
+        return 1;
+    }
+    const int T = static_cast<int>(pitchf.size() / 4);
+    const double t0 = monotonicSeconds();
+    std::vector<uint8_t> onnx;
+    if (!model.buildGenerator(T, 0, onnx, &err)) {
+        std::printf("build failed: %s\n", err.c_str());
+        return 1;
+    }
+    const double t1 = monotonicSeconds();
+    writeFile(dir + L"\\echo_rvc.onnx", onnx.data(), onnx.size());
+    ai::OrtGraphSession session;
+    if (!session.create(onnx, false, 0, &err)) {
+        std::printf("session failed: %s\n", err.c_str());
+        return 1;
+    }
+    const double t2 = monotonicSeconds();
+    std::vector<ai::OrtGraphSession::Input> in = {
+        {"phone", ai::OnnxType::Float, {1, T, I.embDim}, phone.data()},
+        {"pitch", ai::OnnxType::Int64, {1, T}, pitch.data()},
+        {"pitchf", ai::OnnxType::Float, {1, T}, pitchf.data()},
+        {"rnd", ai::OnnxType::Float, {1, I.inter, T}, rnd.data()},
+        {"noise", ai::OnnxType::Float, {1, static_cast<int64_t>(T) * I.hop}, noise.data()},
+    };
+    std::vector<std::vector<float>> out;
+    if (!session.run(in, {"audio"}, out, &err)) {
+        std::printf("run failed: %s\n", err.c_str());
+        return 1;
+    }
+    double t3 = monotonicSeconds();
+    for (int r = 0; r < 3; ++r) session.run(in, {"audio"}, out, &err);
+    const double t4 = monotonicSeconds();
+    writeFile(dir + L"\\echo_out.bin", out[0].data(), out[0].size() * 4);
+    std::printf("%d frames: graph %.0f ms (%zu bytes), session %.0f ms, first run %.0f ms, then %.0f ms per run; %zu samples\n", T,
+                (t1 - t0) * 1000.0, onnx.size(), (t2 - t1) * 1000.0, (t3 - t2) * 1000.0, (t4 - t3) * 1000.0 / 3.0, out[0].size());
+    return 0;
+}
+
+// Lists a PyTorch checkpoint: its top-level keys and every tensor with its
+// shape and sum (to compare Echo's reader with PyTorch).
+int torchInfo(const std::wstring& path) {
+    ai::TorchCheckpoint ck;
+    std::string err;
+    if (!ck.open(path, &err)) {
+        std::printf("open failed: %s\n", err.c_str());
+        return 1;
+    }
+    const ai::PyRef& root = ck.root();
+    std::printf("root kind %d, %zu keys\n", static_cast<int>(root->kind), root->dict.size());
+    for (const auto& [k, v] : root->dict) {
+        std::string val;
+        if (v->kind == ai::PyValue::Kind::Str) val = v->s;
+        else if (v->isNumber()) val = std::to_string(v->number());
+        else if (v->kind == ai::PyValue::Kind::List || v->kind == ai::PyValue::Kind::Tuple) val = std::to_string(v->items.size()) + " items";
+        else if (v->kind == ai::PyValue::Kind::Dict) val = std::to_string(v->dict.size()) + " entries";
+        std::printf("  %s: %s\n", k->s.c_str(), val.c_str());
+    }
+    const ai::PyRef weights = root->get("weight") ? root->get("weight") : root;
+    const auto tensors = ai::TorchCheckpoint::tensors(weights);
+    std::printf("%zu tensors\n", tensors.size());
+    for (const auto& [name, t] : tensors) {
+        std::vector<float> v;
+        if (!ck.read(t, v, &err)) {
+            std::printf("%s: %s\n", name.c_str(), err.c_str());
+            return 1;
+        }
+        double sum = 0.0, abs = 0.0;
+        for (float x : v) sum += x, abs += std::fabs(x);
+        std::string shape;
+        for (int64_t d : t.shape) shape += std::to_string(d) + " ";
+        std::printf("%s [%s] %s sum %.6f abs %.6f\n", name.c_str(), shape.c_str(), t.dtype.c_str(), sum, abs);
+    }
+    return 0;
+}
+
+// Decodes a sound file the way the soundboard does (WAV, MP3, OGG...) and
+// writes it as a 48 kHz 32-bit float WAV, for preparing the built-in sounds.
+int decodeSound(const std::wstring& in, const std::wstring& out) {
+    win::DecodedAudio a;
+    std::string err;
+    if (!win::decodeAudioFile(in, 0.0, a, &err)) {
+        std::printf("decode failed: %s\n", err.c_str());
+        return 1;
+    }
+    std::vector<float> x = a.sampleRate == 48000 ? std::move(a.samples) : resampleOffline(a.samples, a.channels, a.sampleRate, 48000);
+    WavWriter w;
+    if (!w.open(out, 48000, a.channels, 32) || !w.write(x.data(), x.size() / a.channels)) {
+        std::printf("cannot write %s\n", wideToUtf8(out).c_str());
+        return 1;
+    }
+    w.close();
+    std::printf("%d Hz, %d ch, %.3f s\n", a.sampleRate, a.channels, double(x.size() / a.channels) / 48000.0);
+    return 0;
+}
+
 // Push to talk through GetAsyncKeyState: synthetic F24/F23 presses (no
 // application uses them) must open/close the gate and toggle mute.
 void cmdHotkeys() {
@@ -1174,12 +1841,244 @@ void cmdHotkeys() {
     const double reopened = waitFor([&] { return gate.load(); }, 0.5);
     result("push to talk off opens the microphone", reopened >= 0 ? 1 : -1, reopened >= 0 ? "gate open" : "gate stayed closed");
     hk.stop();
+
+    // Instant taps: press and release sent together (as some mouse buttons
+    // and mouse software do). Key-state polling alone misses most of them;
+    // the raw input events must catch every one.
+    std::printf("\n== Hotkeys: instant taps (F22 pressed and released in the same instant, 20 times) ==\n");
+    std::atomic<int> downs{0}, ups{0};
+    HotkeyService taps;
+    taps.start([](bool) {}, [&](int id, bool down) {
+        if (id != 7) return;
+        if (down) ++downs;
+        else ++ups;
+    });
+    taps.setActions({HotkeyService::Action{7, KeyBinding{VK_F22, 0}}});
+    Sleep(100);
+    // The old way, for comparison: GetAsyncKeyState every 5 ms.
+    std::atomic<bool> pollStop{false};
+    std::atomic<int> pollSeen{0};
+    std::thread poller([&] {
+        bool was = false;
+        while (!pollStop) {
+            const bool d = (GetAsyncKeyState(VK_F22) & 0x8000) != 0;
+            if (d && !was) ++pollSeen;
+            was = d;
+            Sleep(5);
+        }
+    });
+    int sent = 0;
+    for (int i = 0; i < 20; ++i) {
+        INPUT in[2] = {};
+        in[0].type = in[1].type = INPUT_KEYBOARD;
+        in[0].ki.wVk = in[1].ki.wVk = VK_F22;
+        in[1].ki.dwFlags = KEYEVENTF_KEYUP;
+        if (SendInput(2, in, sizeof(INPUT)) == 2) ++sent;
+        Sleep(40 + 3 * (i % 5));
+    }
+    Sleep(100);
+    pollStop = true;
+    poller.join();
+    const bool raw = taps.rawInputActive();
+    taps.stop();
+    std::snprintf(buf, sizeof(buf), "%d of %d taps reported (press and release each); key-state polling alone saw %d; raw input %s",
+                  downs.load(), sent, pollSeen.load(), raw ? "on" : "off");
+    result("instant taps are never missed", sent > 0 && downs == sent && ups == sent ? 1 : sent == 0 ? 0 : -1,
+           sent == 0 ? "SendInput was blocked, not tested" : buf);
+}
+
+// The soundboard in real time: Echo plays built-in sounds through the
+// soundboard input into the virtual cable's playback side; the recording
+// side (what Discord/OBS receive) is compared with the sound itself. Not
+// audible (the cable is not your speakers); everything stays in memory.
+void cmdSoundboard(DeviceManager& dm) {
+    const char* what = "soundboard through the virtual microphone";
+    const auto pairs = findCablePairs(dm.devices());
+    const CablePair* pair = nullptr;
+    for (const auto& p : pairs)
+        if (!p.secondary) {
+            pair = &p;
+            break;
+        }
+    if (!pair) {
+        result(what, 0, "no virtual cable installed");
+        return;
+    }
+    std::string err;
+    StreamOptions ro;
+    ro.deviceId = fromUtf8(pair->renderId);
+    ro.label = pair->renderName;
+    auto ren = WasapiRender::open(ro, &err);
+    StreamOptions co;
+    co.deviceId = fromUtf8(pair->captureId);
+    co.label = pair->captureName;
+    auto cap = ren ? WasapiCapture::open(co, &err) : nullptr;
+    if (!ren || !cap) {
+        result(what, -1, err);
+        return;
+    }
+    EngineRig rig(48000, 480);
+    auto board = std::make_shared<SoundboardSource>();
+    auto bank = std::make_shared<SoundBank>();
+    for (const char* id : {"ding", "airhorn"}) {
+        auto clip = std::make_shared<SoundClip>();
+        clip->samples = loadBuiltinSound(id, 48000, &err);
+        if (clip->samples.empty()) {
+            result(what, -1, std::string(id) + ": " + err);
+            return;
+        }
+        bank->pads.push_back({clip, 1.0f});
+    }
+    board->setBank(bank);
+    rig.keep.push_back(bank);
+    const int sBoard = rig.addSource(board);
+    const int sCable = rig.addSource(std::make_shared<DeviceCaptureSource>(cap));
+    StripRuntime* boardStrip = rig.addStrip(sBoard);
+    StripRuntime* appStrip = rig.addStrip(sCable);
+    std::shared_ptr<WasapiRender> phones;
+    if (const std::string phonesId = dm.defaultDeviceId(Flow::Render); !phonesId.empty()) {
+        StreamOptions po;
+        po.deviceId = fromUtf8(phonesId);
+        po.label = "default output (clock, silent)";
+        phones = WasapiRender::open(po, &err);
+    }
+    auto devSink = std::make_shared<DeviceRenderSink>(ren);
+    const int kDev = rig.addSink(devSink);
+    if (phones) {
+        auto clockSink = std::make_shared<DeviceRenderSink>(phones);
+        const int kClock = rig.addSink(clockSink);
+        clockSink->setMaster(true, rig.engine.wakeTarget());
+        rig.g->masterSink = kClock;
+    } else {
+        devSink->setMaster(true, rig.engine.wakeTarget());
+        rig.g->masterSink = kDev;
+    }
+    auto direct = std::make_shared<MemorySink>(48000 * 12);
+    auto received = std::make_shared<MemorySink>(48000 * 12);
+    const int kDirect = rig.addSink(direct), kRecv = rig.addSink(received);
+    rig.addBus(kDev);
+    rig.addBus(kRecv);
+    rig.addBus(kDirect);
+    boardStrip->sends[0].enabled = true; // soundboard -> virtual mic -> CABLE Input
+    boardStrip->sends[2].enabled = true; // and straight into memory (reference)
+    appStrip->sends[1].enabled = true;   // "Discord" listening to CABLE Output
+    rig.go();
+    std::printf("Echo plays its 'Ding' and 'Air horn' sounds into '%s' and records '%s' (not audible on your speakers)...\n",
+                pair->renderName.c_str(), pair->captureName.c_str());
+    Sleep(4000); // the cable settles
+    const uint64_t underrunsBefore = ren->stats.underruns.load(), discBefore = cap->stats.discontinuities.load();
+    const size_t playAt1 = direct->written();
+    const double t1 = monotonicSeconds();
+    board->play(0);
+    // Engine latency: from play() to the sound in the engine's output.
+    double engineMs = -1.0;
+    while (monotonicSeconds() - t1 < 1.0) {
+        const auto& d = direct->leftData();
+        const size_t n = direct->written();
+        for (size_t i = playAt1; i < n && engineMs < 0; ++i)
+            if (std::fabs(d[i]) > 1e-4f) engineMs = (monotonicSeconds() - t1) * 1000.0;
+        if (engineMs >= 0) break;
+        std::this_thread::yield();
+    }
+    Sleep(2600);
+    board->play(1);
+    Sleep(3500); // the air horn (3.3 s) and the cable's delay
+    rig.engine.stop();
+
+    const uint64_t underrunsDuring = ren->stats.underruns.load() - underrunsBefore;
+    const uint64_t discDuring = cap->stats.discontinuities.load() - discBefore;
+
+    // The recording side passes through the cable and drift-corrected
+    // resampling, so compare what survives that exactly: the sounds' 10 ms
+    // level envelope (aligned by cross-correlation), their level, and their
+    // octave-band spectrum.
+    const auto& ref = direct->leftData();
+    const auto& rec = received->leftData();
+    const size_t nRef = direct->written(), nRec = received->written();
+    auto envelope = [](const std::vector<float>& x, size_t from, size_t to) {
+        std::vector<double> e;
+        for (size_t i = from; i + 480 <= to; i += 480) {
+            double q = 0;
+            for (size_t k = i; k < i + 480; ++k) q += double(x[k]) * x[k];
+            e.push_back(std::max(-80.0, 10 * std::log10(q / 480 + 1e-12))); // silence is silence, however quiet
+        }
+        return e;
+    };
+    // Both sounds: the ding (2.5 s), a 0.1 s pause, the start of the air horn.
+    const size_t from = playAt1, to = std::min(nRef, playAt1 + 48000 * 46 / 10);
+    const std::vector<double> eRef = envelope(ref, from, to);
+    double best = -2.0;
+    int lagMs = 0;
+    for (int l = 0; l < 500; ++l) { // up to 0.5 s of cable delay, in 1 ms steps
+        const size_t f2 = from + static_cast<size_t>(l) * 48;
+        if (f2 + (to - from) > nRec) break;
+        const std::vector<double> eRec = envelope(rec, f2, f2 + (to - from));
+        const size_t n = std::min(eRef.size(), eRec.size());
+        double ma = 0, mb = 0;
+        for (size_t i = 0; i < n; ++i) ma += eRef[i], mb += eRec[i];
+        ma /= n, mb /= n;
+        double sab = 0, saa = 0, sbb = 0;
+        for (size_t i = 0; i < n; ++i) sab += (eRef[i] - ma) * (eRec[i] - mb), saa += (eRef[i] - ma) * (eRef[i] - ma), sbb += (eRec[i] - mb) * (eRec[i] - mb);
+        const double c = sab / std::sqrt(saa * sbb + 1e-12);
+        if (c > best) best = c, lagMs = l;
+    }
+    const size_t off = static_cast<size_t>(lagMs) * 48;
+    if (std::getenv("ECHO_HWTEST_DEBUG")) {
+        const std::vector<double> eRec = envelope(rec, from + off, from + off + (to - from));
+        for (size_t i = 0; i < eRef.size(); i += 10) std::printf("  %4.1fs ref %6.1f rec %6.1f\n", i * 0.01, eRef[i], i < eRec.size() ? eRec[i] : -999.0);
+    }
+    double eA = 0, eB = 0;
+    for (size_t i = from; i < to && i + off < nRec; ++i) eA += double(ref[i]) * ref[i], eB += double(rec[i + off]) * rec[i + off];
+    const double levelDiff = 10 * std::log10((eB + 1e-20) / (eA + 1e-20));
+    // Octave bands 125 Hz - 8 kHz (Goertzel sums over each band's bins would
+    // be slow; a 2nd-order band-pass per band is enough here).
+    double worstBand = 0.0;
+    for (double fc : {125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0}) {
+        auto bandEnergy = [&](const std::vector<float>& x, size_t a0, size_t a1) {
+            const double w0 = 2 * kPiD * fc / 48000.0, alpha = std::sin(w0) / (2 * 1.41);
+            const double b0 = alpha, b2 = -alpha, a0c = 1 + alpha, a1c = -2 * std::cos(w0), a2c = 1 - alpha;
+            double x1 = 0, x2 = 0, y1 = 0, y2 = 0, e = 0;
+            for (size_t i = a0; i < a1; ++i) {
+                const double y = (b0 * x[i] + b2 * x2 - a1c * y1 - a2c * y2) / a0c;
+                x2 = x1, x1 = x[i], y2 = y1, y1 = y;
+                e += y * y;
+            }
+            return e;
+        };
+        const double ba = bandEnergy(ref, from, to), bb = bandEnergy(rec, from + off, std::min(nRec, to + off));
+        if (ba > eA * 1e-4) worstBand = std::max(worstBand, std::fabs(10 * std::log10((bb + 1e-20) / (ba + 1e-20))));
+    }
+    char buf[600];
+    std::snprintf(buf, sizeof(buf),
+                  "'%s' received both sounds: level %+.2f dB vs what Echo played, envelope correlation %.3f, octave bands "
+                  "within %.2f dB, cable delay %d ms; play() to sound in Echo's output %.1f ms; during the sounds: render "
+                  "underruns %llu, recording-side discontinuities %llu (start-up: %llu underruns)",
+                  pair->captureName.c_str(), levelDiff, best, worstBand, lagMs, engineMs,
+                  (unsigned long long)underrunsDuring, (unsigned long long)discDuring, (unsigned long long)underrunsBefore);
+    const bool ok = best > 0.98 && std::fabs(levelDiff) < 0.5 && worstBand < 1.0 && engineMs >= 0 && engineMs < 40.0 &&
+                    underrunsDuring == 0 && discDuring == 0;
+    result(what, ok ? 1 : -1, buf);
 }
 
 int wmain(int argc, wchar_t** argv) {
     SetConsoleOutputCP(CP_UTF8);
     if (argc > 2 && std::wstring(argv[1]) == L"export-presets") return exportPresets(argv[2]);
     ComScope com(COINIT_MULTITHREADED);
+    if (argc > 3 && std::wstring(argv[1]) == L"decode") return decodeSound(argv[2], argv[3]);
+    if (argc > 2 && std::wstring(argv[1]) == L"torch-info") return torchInfo(argv[2]);
+    if (argc > 3 && std::wstring(argv[1]) == L"rvc-run") return rvcRun(argv[2], argv[3]);
+    if (argc > 2 && std::wstring(argv[1]) == L"faiss-info") return faissInfo(argv[2]);
+    if (argc > 2 && std::wstring(argv[1]) == L"contentvec-download") return contentVecDownload(argv[2]);
+    if (argc > 2 && std::wstring(argv[1]) == L"vbcable-download") return vbCableDownload(argv[2]);
+    if (argc > 1 && std::wstring(argv[1]) == L"dml-probe") return dmlProbe();
+    if (argc > 4 && std::wstring(argv[1]) == L"rvc-offline")
+        return rvcOffline(argv[2], argv[3], argv[4], argc > 5 ? static_cast<float>(_wtof(argv[5])) : 0.0f,
+                          argc > 6 ? static_cast<float>(_wtof(argv[6])) : 50.0f, argc > 7 ? static_cast<unsigned>(_wtoi(argv[7])) : 1u);
+    if (argc > 4 && std::wstring(argv[1]) == L"rvc-convert")
+        return rvcConvert(argv[2], argv[3], argv[4], argc > 5 ? static_cast<float>(_wtof(argv[5])) : 0.0f,
+                          argc > 6 ? static_cast<float>(_wtof(argv[6])) : 50.0f, argc > 7 ? _wtoi(argv[7]) : 1,
+                          argc > 8 && _wtoi(argv[8]) != 0);
+    if (argc > 3 && std::wstring(argv[1]) == L"contentvec-run") return contentVecRun(argv[2], argv[3], argc > 4 ? _wtoi(argv[4]) : 12);
     std::wstring cmd = argc > 1 ? argv[1] : L"list";
     DeviceManager dm;
     std::string err;
@@ -1203,7 +2102,10 @@ int wmain(int argc, wchar_t** argv) {
     if (cmd == L"cableraw") cmdCableRaw(dm, argc > 2 ? _wtoi(argv[2]) : 15, argc > 3 ? _wtof(argv[3]) : 40.0);
     if (cmd == L"soak") cmdSoak(dm, argc > 2 ? _wtof(argv[2]) : 60.0);
     if (cmd == L"denoise") cmdDenoise(dm, argc > 2 ? _wtof(argv[2]) : 10.0);
+    if (cmd == L"voice")
+        cmdVoice(dm, argc > 2 ? wideToUtf8(argv[2]) : std::string("Pain"), std::max(12.0, argc > 3 ? _wtof(argv[3]) : 12.0));
     if (cmd == L"hotkeys") cmdHotkeys();
+    if (cmd == L"soundboard") cmdSoundboard(dm);
     std::printf("\nSummary: %d passed, %d failed, %d skipped\n", g_pass, g_fail, g_skip);
     return g_fail ? 1 : 0;
 }

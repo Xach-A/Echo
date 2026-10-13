@@ -3,16 +3,20 @@
 A free, open-source Windows 10/11 virtual audio mixer and real-time voice changer:
 multichannel mixing and routing, per-application capture, a 30-effect DSP library,
 neural background-noise suppression (on by default for microphones) and echo cancellation,
-pitch/formant voice changing, pitch correction ("autotune"), recording, and an optional
-local AI voice-conversion pipeline. No accounts, subscriptions, ads, telemetry or network access.
+pitch/formant voice changing, pitch correction ("autotune"), a soundboard, recording, and
+optional AI voices (RVC models, run on your PC). No accounts, subscriptions, ads or telemetry;
+Echo goes online only when you click Download ContentVec (the speech model RVC voices need) or
+Install VB-CABLE.
 
 ## Quick start
 
 1. Install: run `Echo-<version>-setup-win64.exe` (per user, no admin), or unzip the portable build.
 2. Start Echo; the setup guide picks your microphone and headphones.
-3. **Virtual microphone for Discord/OBS/games** needs a virtual audio cable driver (e.g. free
-   VB-CABLE from vb-audio.com). Install it, press Rescan on the Devices screen; then in Discord
-   choose `CABLE Output` as the input device. See `docs/VIRTUAL_DEVICES.md`.
+3. **Virtual microphone for Discord, Roblox, OBS and games** needs a virtual audio cable driver.
+   The setup guide's **Install VB-CABLE** button downloads VB-Audio's free installer and opens it
+   (or get it from vb-audio.com). Then in the app choose `CABLE Output` as the microphone (input)
+   and keep your headphones as its speakers (output); leave Windows' own sound settings as they
+   are. See `docs/VIRTUAL_DEVICES.md`.
 4. **Home**: mute, push to talk status, noise removal, hearing yourself and quick voices.
    **Voices**: one-click voices (deep, chipmunk, robot, monster, radio, ...) with the delay each
    adds, pitch/formant and pitch correction, noise removal, voice gate and echo cancellation.

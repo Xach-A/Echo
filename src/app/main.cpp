@@ -438,7 +438,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int showCmd)
     g_app = &app;
     std::string err;
     const float windowDpi = GetDpiForWindow(hwnd) / 96.0f;
-    echo::ui::applyTheme(0, windowDpi, 1.0f);
+    echo::ui::applyTheme(echo::ui::ThemeChoice{}, windowDpi, 1.0f);
     if (!app.init(hwnd, g_device, safeMode, &err)) {
         MessageBoxW(hwnd, (L"Audio system initialisation failed:\n" + echo::utf8ToWide(err)).c_str(), ECHO_APP_NAME_W,
                     MB_ICONERROR);

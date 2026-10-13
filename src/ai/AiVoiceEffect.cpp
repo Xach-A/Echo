@@ -5,11 +5,14 @@
 #endif
 #include <windows.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <iterator>
 #include <limits>
 
+#include "ai/RvcVoice.h"
 #include "core/Log.h"
 #include "dsp/EffectRegistry.h"
 #include "session/Paths.h"
@@ -17,15 +20,31 @@
 namespace echo {
 
 namespace {
+const char* const kResponseNames[] = {"Quicker", "Balanced", "Smoother", nullptr};
 const ParamInfo kAiParams[] = {
     {"pitch", "Pitch", -24.0f, 24.0f, 0.0f, "st", ParamScale::Linear, nullptr,
      "Pitch shift passed to the model (only if the model supports it)"},
     {"mix", "Mix", 0.0f, 100.0f, 100.0f, "%", ParamScale::Linear},
-    {"latency", "Buffer", 100.0f, 2000.0f, 400.0f, "ms", ParamScale::Linear, nullptr,
-     "Fixed delay that gives inference time to finish. Raise it if you hear dropouts."},
+    {"latency", "Buffer", 100.0f, 2000.0f, 100.0f, "ms", ParamScale::Linear, nullptr,
+     "Least delay. The delay is never shorter than the voice needs (see Response). Raise it if you hear dropouts."},
+    {"index", "Voice match", 0.0f, 100.0f, 50.0f, "%", ParamScale::Linear, nullptr,
+     "RVC voices with an index: how strongly the index pulls your speech towards the voice's own sound"},
+    {"response", "Response", 0.0f, 2.0f, 1.0f, "", ParamScale::Enum, kResponseNames,
+     "RVC voices: Quicker answers sooner but can sound rougher; Smoother sounds cleaner but later"},
 };
+
+// RVC voices are converted in pieces (chunk) with some audio before them
+// (context), blended over a crossfade: shorter pieces answer sooner, longer
+// ones sound smoother. Milliseconds: chunk, context, crossfade.
+void rvcResponse(int r, ai::ModelManifest& m) {
+    static const int kSizes[3][3] = {{120, 250, 30}, {150, 300, 40}, {250, 400, 60}};
+    const int* s = kSizes[std::clamp(r, 0, 2)];
+    m.chunkMs = s[0];
+    m.contextMs = s[1];
+    m.crossfadeMs = s[2];
+}
 ECHO_EFFECT_INFO(kAiInfo, "ai_voice", "AI Voice Conversion", "AI",
-                 "Runs a user-installed ONNX voice model asynchronously (off the audio thread).", kAiParams, false);
+                 "Runs a voice model you added (RVC or ONNX) off the audio thread.", kAiParams, false);
 } // namespace
 
 void registerAiEffects(EffectRegistry& r) { registerEffect<ai::AiVoiceEffect>(r, kAiInfo); }
@@ -50,12 +69,16 @@ const char* AiVoiceEffect::visLabel(int s) const {
     }
 }
 
-void AiVoiceEffect::setModel(const ModelManifest& m, bool preferGpu) {
+void AiVoiceEffect::setModel(const ModelManifest& m, bool preferGpu) { select(m, preferGpu, false); }
+
+void AiVoiceEffect::select(const ModelManifest& m, bool preferGpu, bool gpuAuto) {
     {
         std::lock_guard<std::mutex> lock(modelMutex_);
         pending_ = m;
         pendingGpu_ = preferGpu;
+        gpuAuto_ = gpuAuto;
         modelName_ = m.name;
+        modelKind_ = m.kind;
         modelId_ = m.id;
     }
     setStatus(AiStatus::Loading, "Loading " + m.name + "...");
@@ -63,11 +86,32 @@ void AiVoiceEffect::setModel(const ModelManifest& m, bool preferGpu) {
     if (!worker_.joinable()) worker_ = std::thread(&AiVoiceEffect::workerMain, this);
 }
 
+void AiVoiceEffect::setPreferGpu(bool gpu) {
+    bool reload = false;
+    {
+        std::lock_guard<std::mutex> lock(modelMutex_);
+        if (pendingGpu_ == gpu && !gpuAuto_) return;
+        pendingGpu_ = gpu;
+        gpuAuto_ = false;
+        reload = pending_.valid;
+    }
+    if (reload) {
+        setStatus(AiStatus::Loading, "Loading " + modelName() + "...");
+        modelDirty_ = true;
+    }
+}
+
+bool AiVoiceEffect::prefersGpu() const {
+    std::lock_guard<std::mutex> lock(modelMutex_);
+    return pendingGpu_;
+}
+
 void AiVoiceEffect::clearModel() {
     {
         std::lock_guard<std::mutex> lock(modelMutex_);
         pending_ = ModelManifest{};
         modelName_.clear();
+        modelKind_.clear();
         modelId_.clear();
     }
     modelDirty_ = true;
@@ -77,21 +121,29 @@ void AiVoiceEffect::clearModel() {
 std::string AiVoiceEffect::saveState() const {
     std::lock_guard<std::mutex> lock(modelMutex_);
     if (modelId_.empty()) return {};
-    return modelId_ + (pendingGpu_ ? "|gpu" : "");
+    if (gpuAuto_) return modelId_;
+    return modelId_ + (pendingGpu_ ? "|gpu" : "|cpu");
 }
 
 void AiVoiceEffect::loadState(const std::string& state) {
     const auto bar = state.find('|');
     restoreId_ = state.substr(0, bar);
     restoreGpu_ = bar != std::string::npos && state.substr(bar + 1) == "gpu";
+    restoreGpuAuto_ = bar == std::string::npos;
     std::lock_guard<std::mutex> lock(modelMutex_);
     modelId_ = restoreId_;
     pendingGpu_ = restoreGpu_;
+    gpuAuto_ = restoreGpuAuto_;
 }
 
 std::string AiVoiceEffect::modelName() const {
     std::lock_guard<std::mutex> lock(modelMutex_);
     return modelName_;
+}
+
+std::string AiVoiceEffect::modelKind() const {
+    std::lock_guard<std::mutex> lock(modelMutex_);
+    return modelKind_;
 }
 
 std::string AiVoiceEffect::statusText() const {
@@ -128,7 +180,7 @@ void AiVoiceEffect::onPrepare() {
         restoreId_.clear();
         for (const auto& m : scanModels(paths::modelsDir()))
             if (m.id == id && m.valid) {
-                setModel(m, restoreGpu_);
+                select(m, restoreGpu_, restoreGpuAuto_);
                 return;
             }
         setStatus(AiStatus::Error, "Saved model '" + id + "' is no longer installed");
@@ -214,7 +266,7 @@ void AiVoiceEffect::processImpl(float* const* ch, int numCh, int n) {
 }
 
 void AiVoiceEffect::workerMain() {
-    std::unique_ptr<OnnxVoiceModel> model;
+    std::unique_ptr<VoiceConverter> model;
     ModelManifest m;
     Resampler down, up;
     double ratioDown = 1.0, ratioUp = 1.0;
@@ -233,24 +285,50 @@ void AiVoiceEffect::workerMain() {
         haveTail = false;
     };
 
+    int response = -1; // the Response an RVC voice was loaded with
     while (!stop_.load()) {
+        if (model && m.kind == "rvc" && static_cast<int>(std::lround(p(4))) != response) modelDirty_ = true;
         if (modelDirty_.exchange(false)) {
             active_ = false;
             model.reset();
             ModelManifest next;
-            bool gpu = false;
+            bool gpu = false, gpuAuto = false;
             {
                 std::lock_guard<std::mutex> lock(modelMutex_);
                 next = pending_;
                 gpu = pendingGpu_;
+                gpuAuto = gpuAuto_;
+            }
+            if (gpuAuto && next.valid) {
+                OrtRuntime& rt = OrtRuntime::instance();
+                gpu = rt.ensureLoaded() && rt.hasGpu();
+                std::lock_guard<std::mutex> lock(modelMutex_);
+                if (gpuAuto_) {
+                    pendingGpu_ = gpu;
+                    gpuAuto_ = false;
+                }
             }
             if (!next.valid) {
                 setStatus(AiStatus::NoModel, next.error.empty() ? "No model selected" : next.error);
             } else {
                 setStatus(AiStatus::Loading, "Loading " + next.name + "...");
-                auto mdl = std::make_unique<OnnxVoiceModel>();
+                std::unique_ptr<VoiceConverter> mdl;
                 std::string err;
-                if (!mdl->load(next, gpu, &err)) {
+                bool loaded = false;
+                if (next.kind == "rvc") {
+                    response = static_cast<int>(std::lround(p(4)));
+                    rvcResponse(response, next);
+                    // The networks are built for this block: context + chunk.
+                    auto rvc = std::make_unique<RvcVoice>();
+                    const int block = next.sampleRate * (next.contextMs + next.chunkMs) / 1000;
+                    loaded = rvc->load(next, gpu, block, &err);
+                    mdl = std::move(rvc);
+                } else {
+                    auto onnx = std::make_unique<OnnxVoiceModel>();
+                    loaded = onnx->load(next, gpu, &err);
+                    mdl = std::move(onnx);
+                }
+                if (!loaded) {
                     setStatus(AiStatus::Error, "Could not load model: " + err);
                     ECHO_LOG_WARN("AI model '%s' failed to load: %s", next.name.c_str(), err.c_str());
                 } else {
@@ -267,12 +345,23 @@ void AiVoiceEffect::workerMain() {
                     const int chunkModel = static_cast<int>(m.sampleRate * m.chunkMs / 1000.0);
                     history.assign(static_cast<size_t>(ctxModel + chunkModel + 8), 0.0f);
                     tail.assign(static_cast<size_t>(xfModel), 0.0f);
-                    // Fixed offset of the wet stream: crossfade lead plus
-                    // both resamplers' group delays (engine samples).
-                    const double off = xfModel * eng / m.sampleRate + down.latencyInputFrames() +
-                                       up.latencyInputFrames() * eng / m.sampleRate;
-                    wetOffset_ = -static_cast<int>(std::lround(off));
-                    minLatency_ = static_cast<int>(chunkEng * 1.25 + eng * 0.06 + off);
+                    // Each emitted sample is converted audio from a crossfade
+                    // length earlier (the newest crossfade length is held
+                    // back to blend into the next chunk), so the wet stream
+                    // runs that much ahead of the input stream. (The
+                    // resamplers start with half a kernel in their history
+                    // and add only about a sample.)
+                    const double off = xfModel * eng / m.sampleRate;
+                    wetOffset_ = static_cast<int>(std::lround(off));
+                    // The delay must leave room for a block to be converted:
+                    // time one (after a warm-up run) and allow 1.5x that.
+                    std::vector<float> warm(static_cast<size_t>(ctxModel + chunkModel), 0.0f), warmOut;
+                    std::string werr;
+                    model->run(warm.data(), static_cast<int>(warm.size()), 0.0f, warmOut, &werr);
+                    const auto w0 = clock::now();
+                    model->run(warm.data(), static_cast<int>(warm.size()), 0.0f, warmOut, &werr);
+                    const double runSec = std::chrono::duration<double>(clock::now() - w0).count();
+                    minLatency_ = static_cast<int>(chunkEng + std::max(chunkEng * 0.25 + eng * 0.06, 1.5 * runSec * eng + eng * 0.03) + off);
                     {
                         std::lock_guard<std::mutex> lock(modelMutex_);
                         provider_ = model->provider();
@@ -337,6 +426,7 @@ void AiVoiceEffect::workerMain() {
             history = modelIn;
             const auto t0 = clock::now();
             std::string err;
+            model->setIndexRate(p(3) / 100.0f);
             if (!model->run(modelIn.data(), static_cast<int>(modelIn.size()), p(0), modelOut, &err)) {
                 setStatus(AiStatus::Error, "Inference failed: " + err);
                 ECHO_LOG_WARN("AI inference failed: %s", err.c_str());

@@ -32,14 +32,21 @@ public:
     // on the worker thread.
     void setModel(const ModelManifest& m, bool preferGpu);
     void clearModel();
+    // Runs the voice on the graphics card (DirectML) or the CPU; a loaded
+    // voice reloads.
+    void setPreferGpu(bool gpu);
+    bool prefersGpu() const;
     std::string modelName() const;
+    std::string modelKind() const; // "rvc" or "onnx" ("" with no model)
     std::string statusText() const;
     std::string providerName() const;
     AiStatus status() const { return static_cast<AiStatus>(status_.load()); }
 
     int latencySamples() const override;
     const char* visLabel(int s) const override;
-    // Persists the selected model ("<model folder>|gpu" or "<model folder>").
+    // Persists the selected model ("<model folder>|gpu" or "|cpu"; a plain
+    // "<model folder>", saved before there was a choice, means the graphics
+    // card when Echo can use one).
     std::string saveState() const override;
     void loadState(const std::string& state) override;
 
@@ -61,6 +68,7 @@ protected:
 
 private:
     void workerMain();
+    void select(const ModelManifest& m, bool preferGpu, bool gpuAuto);
     void setStatus(AiStatus s, const std::string& text);
 
     // Audio-thread state
@@ -80,10 +88,11 @@ private:
     mutable std::mutex modelMutex_;
     ModelManifest pending_;
     bool pendingGpu_ = false;
+    bool gpuAuto_ = false;         // no choice saved: the graphics card if Echo can use one
     std::string modelId_;          // folder name of the selected model
     std::string restoreId_;        // model to load after prepare()
-    bool restoreGpu_ = false;
-    std::string modelName_, statusText_, provider_;
+    bool restoreGpu_ = false, restoreGpuAuto_ = false;
+    std::string modelName_, modelKind_, statusText_, provider_;
     std::atomic<int> status_{static_cast<int>(AiStatus::NoModel)};
     std::atomic<bool> active_{false}; // a model is loaded and producing audio
     // Lock-free reset handshake between the audio thread and the worker:

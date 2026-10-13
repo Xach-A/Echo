@@ -5,11 +5,16 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <filesystem>
 
+#include "audio/VbCable.h"
 #include "audio/VirtualCables.h"
 #include "core/Sources.h"
 #include "imgui.h"
+#include "session/Paths.h"
 #include "ui/App.h"
 #include "ui/Icons.h"
 #include "ui/Pop.h"
@@ -17,6 +22,61 @@
 #include "ui/Widgets.h"
 
 namespace echo::ui {
+
+void EchoApp::drawVbCableInstall() {
+    const Palette& p = pal();
+    const float sc = uiScale();
+    const bool running = vbCableJob_.valid() && vbCableJob_.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
+    if (vbCableJob_.valid() && !running) vbCableLast_ = vbCableJob_.get();
+    // Downloads the pack (once) on a worker, then opens VB-Audio's installer
+    // there too: Windows' permission prompt can wait for the user.
+    auto start = [this]() {
+        vbCableProgress_.cancel = false;
+        vbCableProgress_.done = 0;
+        const std::wstring setup = vbCableLast_.setup;
+        vbCableLast_ = {};
+        vbCableJob_ = std::async(std::launch::async, [this, setup]() {
+            VbCableJob job;
+            job.setup = setup;
+            std::error_code ec;
+            if (job.setup.empty() || !std::filesystem::exists(job.setup, ec)) {
+                job.setup.clear();
+                if (!win::prepareVbCable(paths::localDataDir() + L"\\VB-CABLE", vbCableProgress_, &job.setup, &job.error))
+                    return job;
+            }
+            job.opened = win::openVbCableSetup(job.setup, &job.error);
+            return job;
+        });
+    };
+    if (running) {
+        const uint64_t done = vbCableProgress_.done.load();
+        if (done < win::kVbCableBytes) {
+            char label[64];
+            std::snprintf(label, sizeof(label), "Downloading VB-CABLE: %.1f of %.1f MB", done / 1048576.0,
+                          win::kVbCableBytes / 1048576.0);
+            ImGui::ProgressBar(static_cast<float>(done) / static_cast<float>(win::kVbCableBytes),
+                               ImVec2(std::min(ImGui::GetContentRegionAvail().x, 420.0f * sc), 0), label);
+        } else {
+            pop::Caption("Opening VB-Audio's installer. Windows asks for your permission.");
+        }
+        return;
+    }
+    const bool opened = vbCableLast_.opened;
+    if (opened) {
+        pop::Banner(ICON_CHECK, "VB-Audio's installer is open.", p.goodTint, p.good);
+        pop::Caption("Click Install Driver in its window. When it's done, restart your PC. Echo finds the cable by itself.");
+        if (pop::Button("Open the installer again")) start();
+    } else {
+        if (!vbCableLast_.error.empty()) pop::TextColoredWrapped(p.bad, vbCableLast_.error.c_str());
+        if (pop::Button(ICON_DOWNLOAD "  Install VB-CABLE", pop::Btn::Primary)) start();
+    }
+    ImGui::SameLine();
+    if (pop::Button(ICON_REFRESH "  Rescan")) mc_->rescanDevices();
+    if (!opened)
+        pop::Hint("Downloads VB-Audio's official installer (1.3 MB) and opens it. Windows asks for your permission.");
+    pop::Hint("VB-CABLE is free (donationware) from VB-Audio. If it helps you, you can support them on their site.");
+    if (pop::LinkButton("vb-audio.com/Cable")) ShellExecuteW(nullptr, L"open", win::kVbCablePage, nullptr, nullptr, SW_SHOWNORMAL);
+}
 
 namespace {
 
@@ -184,16 +244,10 @@ void EchoApp::drawDevices() {
     const auto& pairs = backend_->cablePairs();
     pop::BeginCard("##vmic");
     pop::CardTitle("Virtual mic");
-    if (pairs.empty()) {
+    if (pairs.empty() || snapshotNoCable_) {
         pop::Banner(ICON_WARNING, "No virtual audio cable is installed.", p.warnTint, p.warn);
-        pop::Caption("Other apps hear Echo through a virtual audio cable driver. Install one from its official website "
-                     "(Windows may ask for administrator approval and a restart), then press Rescan. Echo doesn't "
-                     "install drivers.");
-        pop::Hint("VB-CABLE by VB-Audio is free (donationware). Virtual Audio Cable by E. Muzychenko is commercial.");
-        if (pop::Button("Open vb-audio.com/Cable", pop::Btn::Primary))
-            ShellExecuteW(nullptr, L"open", L"https://vb-audio.com/Cable/", nullptr, nullptr, SW_SHOWNORMAL);
-        ImGui::SameLine();
-        if (pop::Button("Rescan")) mc_->rescanDevices();
+        pop::Caption("Other apps hear Echo through a virtual audio cable. We recommend VB-CABLE, free from VB-Audio.");
+        drawVbCableInstall();
     } else {
         for (const auto& c : pairs) {
             if (c.secondary) continue;
@@ -237,8 +291,7 @@ void EchoApp::drawDevices() {
                 pop::Caption("Testing...");
             } else if (cableTestDone_ && cableTestRender_ == c.renderId) {
                 char msg[160];
-                std::snprintf(msg, sizeof(msg), "%s: %s (%.1f dBFS, ~%.0f ms)", cableTestResult_.ok ? "Passed" : "Failed",
-                              cableTestResult_.message.c_str(), cableTestResult_.levelDb, cableTestResult_.latencyMs);
+                std::snprintf(msg, sizeof(msg), "%s: %s", cableTestResult_.ok ? "Passed" : "Failed", cableTestResult_.message.c_str());
                 pop::Banner(cableTestResult_.ok ? ICON_CHECK : ICON_WARNING, msg, cableTestResult_.ok ? p.goodTint : p.badTint,
                             cableTestResult_.ok ? p.good : p.bad);
             }
@@ -274,18 +327,20 @@ void EchoApp::drawDevices() {
             pop::Divider();
             ImGui::PopID();
         }
-        pop::Hint("VB-CABLE is a free driver by VB-Audio that you install yourself. Echo doesn't install drivers.");
+        pop::Hint("VB-CABLE is a free (donationware) driver by VB-Audio: https://vb-audio.com/Cable/");
     }
-    if (ImGui::TreeNode("Using it in Discord, OBS, games")) {
-        pop::Caption("In Discord: User Settings > Voice & Video > Input Device > choose the cable's recording side (for "
-                     "example \"CABLE Output\"). Turn off Discord's own noise suppression if you use Echo's. Speak: Echo's "
-                     "Virtual Mic meter and Discord's meter should both move.");
+    if (ImGui::TreeNode("Using it in your apps")) {
+        pop::Caption("In your app's voice or audio settings, set the microphone (input) to the cable's recording side, "
+                     "for example \"CABLE Output\", and leave the speakers (output) on your headphones. Keep Windows' "
+                     "own sound settings as they are. Speak: Echo's Virtual Mic meter and the app's meter should both "
+                     "move.");
         ImGui::TreePop();
     }
     if (ImGui::TreeNode("Removing a cable driver")) {
-        pop::Caption("Echo installs no drivers, so uninstalling Echo leaves them alone. To remove one, use its own "
-                     "uninstaller, or Device Manager > Sound, video and game controllers > right-click the cable > "
-                     "Uninstall device (tick \"delete driver\"), then restart Windows.");
+        pop::Caption("Uninstalling Echo leaves cable drivers alone. To remove VB-CABLE, run VB-Audio's installer again "
+                     "and click Remove Driver. For other cables, use their own uninstaller, or Device Manager > Sound, "
+                     "video and game controllers > right-click the cable > Uninstall device (tick \"delete driver\"), "
+                     "then restart Windows.");
         ImGui::TreePop();
     }
     if (ImGui::TreeNode("Test any playback / recording pair")) {

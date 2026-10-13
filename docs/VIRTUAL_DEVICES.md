@@ -27,10 +27,31 @@ to physical devices. Only "other apps select Echo as a microphone" needs one.
 
 ## Installing a cable driver
 
-Echo does not bundle or install drivers. The cable driver is a separate
-product that you download from its publisher and install yourself: that keeps
-Echo's installer free of third-party redistribution terms and of
-administrator rights, and Echo never installs a driver silently.
+Echo does not bundle or install drivers itself. The cable driver is a
+separate product from its publisher: that keeps Echo's installer free of
+third-party redistribution terms and of administrator rights, and Echo never
+installs a driver silently.
+
+**Install VB-CABLE** (setup guide step 5, or Devices > Virtual mic when no
+cable is found) does the downloading for you, only when you click it:
+
+1. Echo downloads VB-Audio's official driver pack
+   (`https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip`,
+   1.3 MB) into `%LOCALAPPDATA%\Echo\VB-CABLE` and keeps it only if its size
+   and SHA-256 (`b950e39f…16bfb`) match the pack Echo was tested with.
+2. It unpacks the pack with Windows' own `tar.exe` and opens VB-Audio's
+   installer (`VBCABLE_Setup_x64.exe`) with "Run as administrator", so
+   Windows asks for your permission first.
+3. In VB-Audio's window you click **Install Driver**; restart the PC when it
+   is done. Echo finds the new cable by itself.
+
+If VB-Audio replaces the pack, the checksum no longer matches and Echo says so
+instead of opening anything; the link to vb-audio.com always works. VB-CABLE
+stays VB-Audio's product under VB-Audio's license (donationware: copying the
+unmodified pack is allowed, and VB-Audio asks users who like it to donate);
+Echo shows the vb-audio.com link next to the button.
+
+Installing it by hand works the same:
 
 * **VB-CABLE** (free, donationware, one cable): https://vb-audio.com/Cable/ —
   download, extract, right-click `VBCABLE_Setup_x64.exe` > Run as
@@ -65,15 +86,28 @@ carry audio while those apps run and route it; Echo labels them
 
 1. Route your microphone strip to a B bus (the B1 button on the strip is lit).
 2. Make sure that bus outputs to the cable (`CABLE Input ...`).
-3. In the other app choose the cable's recording side:
-   * **Discord**: User Settings > Voice & Video > Input Device > `CABLE Output (VB-Audio Virtual Cable)`.
+3. In the other app choose the cable's recording side as the **microphone
+   (input)** and keep your headphones as its **speakers (output)**:
+   * **Discord**: User Settings > Voice & Video > Input Device > `CABLE Output (VB-Audio Virtual Cable)`;
+     Output Device stays on your headphones.
      Turn off Discord's noise suppression/echo cancellation if Echo already processes the voice.
+   * **Roblox**: in a game, Esc > Settings > Input Device > `CABLE Output` (shown when voice chat is on).
    * **OBS**: Sources > + > Audio Input Capture > Device `CABLE Output`.
    * **Browsers/games**: pick `CABLE Output` as the microphone in their settings.
 4. Speak: the B bus meter in Echo and the app's input meter both move.
 
-Mixing music into the virtual mic: route an application strip (or "Desktop
-Audio") to the same B bus (Routing > "Voice + Music Virtual Mic").
+Leave Windows' own sound settings alone: Windows output stays on your
+headphones or speakers, and Windows input stays on your real microphone.
+Echo listens to that microphone, so don't make `CABLE Output` the Windows
+default input. The Windows volume mixer isn't needed either, except for an
+app that has no microphone setting of its own: there, Settings > System >
+Sound > Volume mixer > the app > Input device > `CABLE Output`.
+
+Mixing music into the virtual mic: capture just that app (Apps) and route it
+to the same B bus. Routing > "Voice + Music Virtual Mic" sends every app input,
+"Desktop Audio" included, which is everything the PC plays: the game you're in
+and the voice chat too, so people hear echoes of themselves. The setup guide
+therefore sends only your voice (and the soundboard).
 
 ## Per-application capture without a driver
 
@@ -105,7 +139,9 @@ the app in the Volume mixer also silences Echo's capture.
 
 ## Removing a driver
 
-Uninstalling Echo never touches drivers. To remove VB-CABLE run its setup
+Uninstalling Echo never touches drivers (the downloaded pack in
+`%LOCALAPPDATA%\Echo\VB-CABLE` goes with Echo's data if you choose to delete
+that). To remove VB-CABLE run its setup
 again as administrator and choose Remove Driver (or Device Manager > Sound,
 video and game controllers > right-click the cable > Uninstall device, tick
 "Attempt to remove the driver"), then reboot.

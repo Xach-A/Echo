@@ -46,6 +46,7 @@ std::string sourceLabel(const StripModel& s) {
     case SourceKind::ProcessLoopback: return "App audio · " + s.source.processName;
     case SourceKind::SystemExcludingEcho: return "All apps except Echo";
     case SourceKind::ToneGenerator: return "Test signal";
+    case SourceKind::Soundboard: return "Soundboard";
     }
     return "?";
 }
@@ -225,7 +226,7 @@ void EchoApp::drawStrip(StripModel& s, float width) {
         std::string chip;
         if (count == 0) chip = "Add effect";
         else if (!voiceFx) chip = count == 1 ? "Noise removal" : "Noise & echo removal";
-        else chip = s.voice.empty() ? std::to_string(count) + " effects" : s.voice;
+        else chip = s.voices.empty() ? std::to_string(count) + " effects" : voicesLabel(s.voices);
         if (rt.fxBypass.load() && count) chip += " (off)";
         const bool fxOn = count > 0 && !rt.fxBypass.load();
         if (pop::Pill((chip + "##fx").c_str(), fxOn ? p.accentTint : p.surface, fxOn ? p.accent : p.lineSoft,

@@ -58,7 +58,8 @@ TEST_CASE("controller: default session routes the microphone to the virtual mic"
     World w;
     w.mc->createDefaultSession();
     REQUIRE(w.mc->session().buses.size() == 2);
-    REQUIRE(w.mc->session().strips.size() == 2);
+    REQUIRE(w.mc->session().strips.size() == 3); // microphone, desktop audio, soundboard
+    CHECK(w.mc->session().strips[2].source.kind == SourceKind::Soundboard);
     CHECK(w.mc->session().buses[1].output.deviceId == "cable_in"); // detected cable
     w.mc->start(false);
     w.step(60);
@@ -77,7 +78,7 @@ TEST_CASE("controller: one capture stream feeds several strips") {
     mic.kind = SourceKind::CaptureDevice; // default device again
     const uint32_t second = w.mc->addStrip(StripGroup::Hardware, mic, "Mic copy");
     CHECK(w.backend.openCaptureCalls == 2); // mic + system audio, no second mic stream
-    CHECK(w.mc->engine().current()->numSources == 2);
+    CHECK(w.mc->engine().current()->numSources == 3); // and the soundboard (no device stream)
     CHECK(w.mc->sourceFor(second) == w.mc->sourceFor(w.mc->session().strips[0].id));
     w.mc->stop();
 }
@@ -653,6 +654,52 @@ TEST_CASE("noise suppression: sessions saved by older versions are upgraded once
     CHECK(w.mc->session().strips[1].chain.empty());
 }
 
+TEST_CASE("noise suppression: a voice gate saved at the old -30 dB default moves to -60 dB, other depths stay") {
+    World w;
+    w.mc->createDefaultSession();
+    Session& cur = w.mc->session();
+    auto first = w.mc->createEffect("voice_denoise");
+    auto second = w.mc->createEffect("voice_denoise");
+    first->setParam("vad_range", -30.0f);  // the old default
+    second->setParam("vad_range", -45.0f); // chosen by the user
+    cur.strips[0].chain = {first};
+    cur.strips[1].chain = {second};
+    cur.configVersion = 3;
+    Session old;
+    std::vector<std::string> warn;
+    REQUIRE(sessionFromJson(sessionToJson(cur), old, &warn));
+    w.mc->replaceSession(std::move(old));
+    CHECK(w.mc->session().strips[0].chain[0]->param(w.mc->session().strips[0].chain[0]->paramIndex("vad_range")) == doctest::Approx(-60.0f));
+    CHECK(w.mc->session().strips[1].chain[0]->param(w.mc->session().strips[0].chain[0]->paramIndex("vad_range")) == doctest::Approx(-45.0f));
+    CHECK(w.mc->session().strips[0].chain[0]->param(w.mc->session().strips[0].chain[0]->paramIndex("clicks")) == doctest::Approx(1.0f)); // typing removal on
+    CHECK(w.mc->session().configVersion == kSessionConfigVersion);
+}
+
+TEST_CASE("ai voice: a Buffer saved at the old 400 default drops to 100, a chosen one stays; Response starts Balanced") {
+    World w;
+    w.mc->createDefaultSession();
+    Session& cur = w.mc->session();
+    auto first = w.mc->createEffect("ai_voice");
+    auto second = w.mc->createEffect("ai_voice");
+    REQUIRE(first);
+    CHECK(first->param(first->paramIndex("latency")) == doctest::Approx(100.0f)); // the new default
+    CHECK(first->param(first->paramIndex("response")) == doctest::Approx(1.0f));  // Balanced
+    first->setParam("latency", 400.0f);  // the old default
+    second->setParam("latency", 700.0f); // chosen by the user
+    cur.strips[0].chain = {first};
+    cur.strips[1].chain = {second};
+    cur.configVersion = 4;
+    Session old;
+    std::vector<std::string> warn;
+    REQUIRE(sessionFromJson(sessionToJson(cur), old, &warn));
+    w.mc->replaceSession(std::move(old));
+    const auto& a = w.mc->session().strips[0].chain[0];
+    const auto& b = w.mc->session().strips[1].chain[0];
+    CHECK(a->param(a->paramIndex("latency")) == doctest::Approx(100.0f));
+    CHECK(b->param(b->paramIndex("latency")) == doctest::Approx(700.0f));
+    CHECK(w.mc->session().configVersion == kSessionConfigVersion);
+}
+
 TEST_CASE("virtual cables: a cable installed later is picked up by an unassigned virtual-mic bus") {
     FakeBackend backend;
     backend.addDevice("mic", "USB Mic", false, 1, 48000, true);
@@ -791,4 +838,39 @@ TEST_CASE("devices: inputs and outputs set to the Windows default follow a defau
     CHECK(renderAmp(*w.backend.renders["phones2"], 330.0) > 0.3);
     CHECK(renderAmp(*w.backend.renders["cable_in"], 330.0) > 0.3);
     w.mc->stop();
+}
+
+TEST_CASE("appearance: themes, accent and the user's own colours are saved and loaded") {
+    Session s;
+    s.ui.theme = kUiThemeCount - 1; // the custom theme
+    s.ui.accent = "custom";
+    s.ui.customAccent = 0x7C3AED;
+    s.ui.customBackground = 0x1B1530;
+    s.ui.customSurface = 0x251D40;
+    s.ui.customText = 0xF1ECFF;
+    json j = sessionToJson(s);
+    CHECK(j["ui"]["customAccent"] == "#7C3AED");
+    CHECK(j["ui"]["customTheme"]["cards"] == "#251D40");
+    Session back;
+    REQUIRE(sessionFromJson(j, back, nullptr));
+    CHECK(back.ui.theme == kUiThemeCount - 1);
+    CHECK(back.ui.accent == "custom");
+    CHECK(back.ui.customAccent == 0x7C3AEDu);
+    CHECK(back.ui.customBackground == 0x1B1530u);
+    CHECK(back.ui.customSurface == 0x251D40u);
+    CHECK(back.ui.customText == 0xF1ECFFu);
+    // Every ready-made theme survives a round trip; unknown ones and broken
+    // colours fall back.
+    for (int t = 0; t < kUiThemeCount; ++t) {
+        s.ui.theme = t;
+        REQUIRE(sessionFromJson(sessionToJson(s), back, nullptr));
+        CHECK(back.ui.theme == t);
+    }
+    j["ui"]["themeMode"] = 99;
+    j["ui"]["customAccent"] = "#12";
+    j["ui"]["customTheme"]["text"] = "#GGGGGG";
+    REQUIRE(sessionFromJson(j, back, nullptr));
+    CHECK(back.ui.theme == kUiThemeCount - 1);
+    CHECK(back.ui.customAccent == UiSettings{}.customAccent);
+    CHECK(back.ui.customText == UiSettings{}.customText);
 }

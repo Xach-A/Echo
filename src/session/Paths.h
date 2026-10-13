@@ -11,11 +11,13 @@ std::wstring localDataDir();      // %LOCALAPPDATA%\Echo       (logs, crash mark
 std::wstring sessionFile();       // appDataDir\session.json
 std::wstring presetsDir();        // appDataDir\presets
 std::wstring modelsDir();         // appDataDir\models
+std::wstring soundsDir();         // appDataDir\sounds        (the user's soundboard sounds)
 std::wstring logFile();           // localDataDir\logs\echo.log
 std::wstring crashMarkerFile();   // localDataDir\running.marker
 std::wstring imguiIniFile();      // appDataDir\layout.ini
 std::wstring defaultRecordingsDir(); // Music\Echo Recordings
 std::wstring executableDir();
+std::wstring builtinSoundsDir();  // executableDir\sounds    (the soundboard's built-in sounds; read only)
 
 // Allows tests and portable mode to redirect everything to one folder.
 void overrideRoot(const std::wstring& root);

@@ -65,6 +65,10 @@ public:
 
     // User-visible label for this instance (defaults to the type name).
     std::string label;
+    // The voice preset this effect belongs to on an input ("" = added by
+    // hand, or input cleanup). Lets combined voices be added and taken out
+    // one at a time.
+    std::string voice;
     uint32_t instanceId;
 
     std::atomic<bool> bypass{false};

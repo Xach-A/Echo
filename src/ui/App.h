@@ -2,8 +2,11 @@
 // views. Runs entirely on the UI thread.
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <deque>
+#include <map>
+#include <set>
 #include <functional>
 #include <future>
 #include <memory>
@@ -12,12 +15,14 @@
 #include <vector>
 
 #include "audio/AppRouting.h"
+#include "audio/Download.h"
 #include "audio/HotkeyService.h"
 #include "audio/VirtualCables.h"
 #include "audio/WasapiBackend.h"
 #include "core/Meter.h"
 #include "session/MixerController.h"
 #include "session/Presets.h"
+#include "session/Voices.h"
 #include "ui/TextureCache.h"
 
 struct HWND__;
@@ -27,7 +32,7 @@ struct ID3D11Device;
 namespace echo::ui {
 
 // Top-level screens (tabs in the header).
-enum class Page { Home = 0, Voices, Mixer, Apps, Devices, Recorder, Settings, Count };
+enum class Page { Home = 0, Voices, Soundboard, Mixer, Apps, Devices, Recorder, Settings, Count };
 // Sections of the Settings screen.
 enum class SettingsTab { Audio = 0, Hotkeys, Appearance, Startup, Privacy, Diagnostics, About, Count };
 
@@ -116,6 +121,9 @@ public:
     // Windows switched between light and dark app mode.
     void onSystemThemeChanged();
 
+    // Settings > Reset to defaults (see ResetParts), then saves.
+    void resetToDefaults(const ResetParts& parts);
+
     // Runs the setup wizard (first run or from the Help menu).
     void openWizard() { wizardOpen_ = true; wizardStep_ = 0; }
 
@@ -139,11 +147,30 @@ public:
     // The main microphone input (first hardware input) and the first bus of a kind.
     StripModel* primaryMic();
     BusModel* firstBus(BusKind kind);
-    // Delay a voice preset adds on top of the input's noise/echo cleanup (ms,
-    // at the engine rate), measured from the effects' own latency.
-    double presetDelayMs(const ChainPreset& p);
-    // Applies a voice preset (nullptr = original voice) to an input.
+    // Uses only this voice preset on an input (nullptr = original voice).
     void applyVoice(StripModel& s, const ChainPreset* p);
+    // Adds a voice to the input's mix, or takes it out.
+    void toggleVoice(StripModel& s, const std::string& name);
+    // Sets the voices of an input. exclusive: everything else goes (also
+    // effects added by hand); otherwise only voices are added and taken out.
+    // Effects taken out fade out (10 ms, in the audio thread) and are removed
+    // afterwards, so changing voices never clicks. Returns false (with a
+    // message) when the voices don't fit in one chain.
+    bool setVoices(StripModel& s, std::vector<std::string> voices, bool exclusive, bool announce = true);
+    // Removes effects that have finished fading out (every frame).
+    void applyPendingVoices();
+    // Voices screen: tiles add/remove voices (true) or pick one (false).
+    bool& voiceMixMode() { return voiceMix_; }
+
+    // ---- soundboard ----
+    // Plays a pad as its mode says (down = pressed, false = released).
+    void triggerPad(int slot, bool down);
+    // Asks for sound files and adds them as pads (decoded in the background).
+    void importSounds();
+    bool importingSounds() const { return !imports_.empty(); }
+    void removePad(uint32_t padId);
+    // Whether a pad's sound could be loaded ("" = fine).
+    std::string padProblem(const SoundPad& p) const;
 
 private:
     // shell
@@ -161,6 +188,9 @@ private:
     void drawRouting(); // routing table (inside the Mixer)
     void drawFlowDiagram(ImVec2 size);
     void drawVoiceLab(); // the Voices screen
+    void drawSoundboard(); // the Soundboard screen
+    void drawPadEditor();
+    void drawVoiceHotkeys(); // Settings > Hotkeys: voice hotkeys
     void drawAiPanel(StripModel& strip);
     void drawNoiseEchoPanel(StripModel& strip);
     void drawCleanupStatus(Effect& fx);                       // noise suppressor / echo canceller meters
@@ -168,11 +198,20 @@ private:
     bool echoReferencePicker(StripModel& strip, float width); // playback device an echo canceller listens to
     void drawApps();
     void drawDevices();
+    // Installing VB-CABLE on request (setup guide and Devices page).
+    void drawVbCableInstall();
     void drawRecorder();
     void drawDiagnostics(); // Settings > Diagnostics
     void drawSettings();
     void drawHotkeySettings();
     void pollHotkeys();
+    // Key capture popup shared by every hotkey field: returns true when a
+    // binding was chosen for `target` (written to *out).
+    bool keyCaptureButton(const char* id, int target, KeyBinding* out, float minWidth = 160.0f);
+    // What else a key does ("push to talk", "the sound 'Air horn'"...), or "".
+    std::string otherUseOfKey(const KeyBinding& k, const KeyBinding* self);
+    void rebuildSoundBank(bool force = false);
+    void finishImports();
     void drawWizard();
     void drawAbout(); // Settings > About
     void drawToasts();
@@ -216,8 +255,18 @@ private:
     bool routingOpen_ = false;
     int voiceCategory_ = 0;
     uint32_t voiceTarget_ = 0;
-    std::unordered_map<std::string, double> presetDelayCache_;
-    int presetDelayRate_ = 0;
+    // Voice changes in progress: effects fading out, removed at `at`;
+    // `replan` adds the new voices afterwards (when they did not fit at once).
+    struct PendingVoices {
+        uint32_t strip = 0;
+        double at = 0.0;
+        std::vector<std::shared_ptr<Effect>> remove;
+        bool replan = false;
+        std::vector<std::string> target;
+    };
+    std::vector<PendingVoices> pendingVoices_;
+    std::set<const Effect*> fadingEffects(uint32_t strip) const;
+    bool voiceMix_ = false;
 
     // wizard
     bool wizardOpen_ = false;
@@ -226,6 +275,21 @@ private:
 
     // cable test
     std::future<win::CableTestResult> cableTestFuture_;
+    // The ContentVec download (RVC voices): "" when it succeeded.
+    std::future<std::string> contentVecDownload_;
+    win::DownloadProgress contentVecProgress_;
+    std::string contentVecError_;
+    bool snapshotShowAi_ = false;
+    // VB-CABLE: download VB-Audio's pack, then open its installer.
+    struct VbCableJob {
+        std::string error;
+        std::wstring setup; // VB-Audio's installer, once downloaded
+        bool opened = false;
+    };
+    std::future<VbCableJob> vbCableJob_;
+    win::DownloadProgress vbCableProgress_;
+    VbCableJob vbCableLast_;
+    bool snapshotNoCable_ = false; // snapshots: show the screens as without a cable
     bool cableTestRunning_ = false;
     bool cableTestDone_ = false;
     win::CableTestResult cableTestResult_;
@@ -244,6 +308,27 @@ private:
     HotkeySettings appliedHotkeys_;
     bool hotkeysApplied_ = false;
     bool openKeyCapture_ = false;
+    std::vector<win::HotkeyService::Action> appliedActions_;
+    std::map<size_t, std::vector<std::string>> holdAdded_; // per voice hotkey: voices a Hold key added
+    int captureTarget_ = -1;                               // keyCaptureButton waiting for this target
+    int autoCapture_ = -1;                                 // start capturing for this target when its field is drawn
+    // soundboard
+    std::array<std::atomic<int>, SoundboardSource::kMaxPads> padModes_{}; // read by the hotkey thread
+    std::map<std::string, std::shared_ptr<const SoundClip>> clipCache_;
+    std::map<std::string, std::string> clipErrors_; // pad file -> why it could not be loaded
+    std::string soundBankSignature_;
+    struct ImportResult {
+        std::string file;  // file name in the sounds folder
+        std::string error; // non-empty: failed
+        bool truncated = false;
+    };
+    struct Import {
+        std::string name;
+        std::future<ImportResult> result;
+    };
+    std::vector<std::unique_ptr<Import>> imports_;
+    uint32_t editPad_ = 0;   // pad being edited (0 = none)
+    bool openPadEditor_ = false;
     // engine settings being edited
     EngineSettings pendingEngine_;
     bool pendingEngineInit_ = false;

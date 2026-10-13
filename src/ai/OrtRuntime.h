@@ -23,6 +23,24 @@
 
 namespace echo::ai {
 
+// The first entries of OrtDmlApi (dml_provider_factory.h); Echo uses the
+// first and, from ONNX Runtime 1.17, the sixth (pick a graphics card by
+// preference).
+struct OrtDmlApiPrefix {
+    OrtStatus*(ORT_API_CALL* SessionOptionsAppendExecutionProvider_DML)(OrtSessionOptions* options, int device_id);
+    void* SessionOptionsAppendExecutionProvider_DML1;
+    void* CreateGPUAllocationFromD3DResource;
+    void* FreeGPUAllocation;
+    void* GetD3D12ResourceFromAllocation;
+    OrtStatus*(ORT_API_CALL* SessionOptionsAppendExecutionProvider_DML2)(OrtSessionOptions* options, const void* deviceOptions);
+};
+// OrtDmlDeviceOptions: OrtDmlPerformancePreference (1 = high performance),
+// OrtDmlDeviceFilter (1 = graphics cards).
+struct OrtDmlDeviceOptionsAbi {
+    uint32_t preference = 1;
+    uint32_t filter = 1;
+};
+
 class OrtRuntime {
 public:
     static OrtRuntime& instance();
@@ -35,6 +53,12 @@ public:
     std::string version() const { return version_; }
     std::string dllPath() const { return path_; }
     std::vector<std::string> providers() const { return providers_; }
+    bool hasGpu() const; // DirectML is in this build
+    // The OrtApi version agreed with the DLL (older DLLs offer older ones).
+    uint32_t apiVersion() const { return apiVersion_; }
+    // Adds DirectML on the fastest graphics card to `opts`. Returns a name
+    // for the UI ("DirectML on <card>"), or "" when the CPU must be used.
+    std::string addGpu(OrtSessionOptions* opts) const;
     std::string lastError() const;
     static std::vector<std::wstring> searchPaths();
 
@@ -48,6 +72,7 @@ private:
     OrtEnv* env_ = nullptr;
     std::string version_, path_, error_;
     std::vector<std::string> providers_;
+    uint32_t apiVersion_ = 0;
 };
 
 } // namespace echo::ai

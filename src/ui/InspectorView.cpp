@@ -184,9 +184,9 @@ void EchoApp::drawEffectCard(const ChainTarget& t, std::vector<std::shared_ptr<E
     const int lat = fx.latencySamples();
     ImGui::SameLine();
     const float cpu = bypassed ? 0.0f : fx.cpuLoad.load() * 100.0f;
-    if (lat > 0) ImGui::TextDisabled("%3.0f ms %4.1f%%", lat * 1000.0 / mc_->engine().sampleRate(), cpu);
-    else ImGui::TextDisabled("       %4.1f%%", cpu);
-    Tip("Latency added by this effect, and the share of one CPU core it uses");
+    (void)lat;
+    ImGui::TextDisabled("%4.1f%%", cpu);
+    Tip("The share of one CPU core this effect uses");
     ImGui::SameLine();
     const ChainTarget tt = t;
     if (ImGui::SmallButton(ICON_UP) && index > 0) defer([this, tt, index]() { mc_->moveEffect(tt, index, index - 1); });
@@ -399,8 +399,7 @@ void EchoApp::drawInspector() {
         if (mc_->addEffect(t, pick)) toast("Added effect", 1);
         else toast("Effect chain is full", 2);
     }
-    if (totalLatency > 0)
-        ImGui::TextDisabled("Chain latency: %.1f ms", totalLatency * 1000.0 / mc_->engine().sampleRate());
+    (void)totalLatency;
     ImGui::EndChild();
     ImGui::End();
 }

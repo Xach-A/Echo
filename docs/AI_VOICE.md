@@ -1,45 +1,101 @@
-# AI voice conversion
+# AI voices (RVC)
 
-Echo includes an optional, separate AI voice module. **Regular voice changing
-(pitch, formants, characters, pitch correction) never depends on it.**
+Echo can use RVC voice models (made with the RVC WebUI or Applio) on this PC,
+in real time. AI voices are optional: the regular voice changer never needs
+them.
 
-## Status (honest)
+## Add a voice
 
-| Part | Status |
+1. In Echo: **Voices > AI voice > Set up AI voice > Open the voices folder**.
+2. Make a folder for the voice (any name) and put the voice's **.pth** file in
+   it, and its **.index** file if it has one.
+3. Click **Rescan**, then **Use on mic**.
+
+The first time, Echo also needs two things (the panel shows what's missing):
+
+* **ONNX Runtime** (Microsoft's free AI engine, MIT): run
+  `tools\fetch_onnxruntime.ps1` from Echo's folder (it asks first, downloads
+  about 83 MB from github.com/microsoft/onnxruntime and checks its SHA-256),
+  or copy `onnxruntime.dll` and `onnxruntime_providers_shared.dll` into the
+  `ai` folder next to Echo.exe. With a graphics card, run it with **-Gpu**
+  instead: it gets the DirectML build (12 MB from nuget.org, SHA-512 checked),
+  which converts on the graphics card and uses the DirectML that comes with
+  Windows.
+* **ContentVec**, the speech model every RVC voice uses (361 MB, MIT): click
+  **Download ContentVec**. Echo downloads it only then, from the Applio
+  project's copy on Hugging Face, checks its size and SHA-256
+  (`d8dd400e…854e`), and keeps it as `%APPDATA%\Echo\ai\contentvec.bin`.
+
+Use only voices you have the right to use, and never to pretend to be
+someone. RVC files carry no license information; Echo shows that.
+
+## Controls
+
+| Control | What it does |
 |---|---|
-| Asynchronous inference pipeline (bounded queues, fixed latency, dry fallback, crossfaded chunks, resampling) | Implemented and tested with a real ONNX Runtime 1.30.0 and a deterministic test model (`tests/data/echo-test-lowpass`): audio-thread calls stay under 0.2 ms, zero fallbacks in steady state, output verified sample-accurately. |
-| Model packages (manifest, license/consent fields, validation) | Implemented and tested. |
-| CPU inference | Tested (test model). |
-| GPU (DirectML) | Implemented, **not tested** (needs the DirectML build of ONNX Runtime and a GPU). Falls back to CPU. |
-| Voice imitation quality | **Not verified.** Echo ships no voice models and none was available for testing. Quality, latency and CPU use depend entirely on the model you install. |
-| RVC / so-vits-svc checkpoints | **Not directly supported.** They need a wrapper ONNX graph that matches the contract below (feature extractor + generator + pitch input). |
+| Pitch | Moves your voice up or down (semitones) before the AI voice takes over. +12 suits a deep voice using a high voice's model. |
+| Voice match | Voices with an .index: how strongly the index pulls your speech towards the voice's own sound (0–100 %, default 50 %). |
+| Mix | Your plain voice vs the AI voice. |
+| Response | RVC voices: Quicker, Balanced (default) or Smoother. Quicker is heard sooner but can sound rougher; Smoother sounds cleaner but later. Changing it reloads the voice (a second or two of your plain voice). |
+| Use the graphics card | Shown with the DirectML build of ONNX Runtime; on by default there. Echo picks the card Windows ranks fastest (on a laptop, the NVIDIA/AMD card rather than the built-in Intel one) and shows its name. Switching reloads the voice. |
 
-## Requirements
+## What works
 
-1. **ONNX Runtime** (MIT, Microsoft). Not bundled. Install it explicitly:
-   `powershell -ExecutionPolicy Bypass -File tools\fetch_onnxruntime.ps1`
-   (asks for confirmation, downloads ~83 MB from github.com/microsoft/onnxruntime,
-   verifies SHA-256, copies the DLLs to `ai\` next to Echo.exe). Alternatively copy
-   `onnxruntime.dll` and `onnxruntime_providers_shared.dll` there yourself, or put
-   them in `%APPDATA%\Echo\ai\`, or point the `ECHO_ONNXRUNTIME` environment
-   variable at `onnxruntime.dll`. Echo only loads these full paths (never
-   Windows' own System32 copy).
-   *Privacy:* official ONNX Runtime builds contain Microsoft trace logging
-   (ETW, only collected if a Windows diagnostic trace session is active). Echo
-   calls `DisableTelemetryEvents()` immediately after loading the runtime.
-2. **A voice model** you have the right to use, packaged as described below,
-   placed in `%APPDATA%\Echo\models\<folder>\`.
+| | Status |
+|---|---|
+| RVC v2 voices with pitch guidance and the HiFi-GAN vocoder (the usual kind) | Works. Verified on a real 32 kHz v2 voice made with Applio: Echo's voice network matches the official code to within 5e-6 (106 dB signal-to-error); ContentVec matches Hugging Face's implementation to within 3e-5 |
+| .index files (FAISS IVF-Flat or flat) | Works: RVC's retrieval (nearest cluster, 8 nearest features, weights 1/distance²), 0.6 ms per frame for a 71,000-vector index |
+| RVC v1 voices | Implemented the way the original RVC does it (ContentVec layer 9, projected to 256 values); not tried on a real v1 voice |
+| Voices without pitch guidance, the RefineGAN or MRF vocoders, other speech encoders | Not supported; Echo says so when you add one |
+| Graphics card (DirectML) | Works with the DirectML build (`fetch_onnxruntime.ps1 -Gpu`, ONNX Runtime 1.24.4). Verified on an NVIDIA GeForce RTX 5070 Ti Laptop GPU with Windows' own DirectML 1.15.5: the voice network and ContentVec match the CPU to within 4e-7 and 3e-6, a real voice sounds the same as on the CPU (0.01 dB log-mel). DirectML doesn't accept 1-D transposed convolutions with output padding, so voices with odd upsampling rates use the equivalent 2-D form (tested equal on the CPU) |
 
-## Using it
+## Speed and delay
 
-Voices > AI voice (optional) > Set up AI voice > (ONNX Runtime found) > choose a model >
-**Use on input**.
-The effect appears in that input's chain. Controls: Pitch (passed to models
-that support it), Mix, Buffer (fixed latency; raise it if "fallbacks to dry
-voice" keeps growing). Status shows inference time per chunk and the
-real-time factor (must stay well below 1.0).
+An AI voice is always heard a little after you speak: Echo converts your
+voice in blocks, each with some of what you said before for context, and the
+newest part of each block only blends into the next one. Echo times the voice
+when it loads and sets the delay to leave room for converting a block; if a
+voice is too heavy, parts of your plain voice come through and the panel says
+so. The Response choice sets the block sizes:
 
-## Model package format
+| Response | Block, context, blend | Delay, 12-core (24-thread) CPU | Delay, RTX 5070 Ti Laptop GPU | Difference to whole-file conversion (log-mel) |
+|---|---|---|---|---|
+| Quicker | 120, 250, 30 ms | 0.30 s (block converted in 0.77 of real time) | 0.24 s (0.19) | 6.6 dB |
+| Balanced (default) | 150, 300, 40 ms | 0.37 s (0.68 of real time) | 0.29 s (0.19) | 5.9 dB |
+| Smoother | 250, 400, 60 ms | 0.54 s (0.54 of real time) | 0.43 s (0.14) | 5.5 dB |
+
+All of these converted 12 s of speech in real time with no fallbacks to the
+plain voice (RVC v2 voice, 32 kHz). On the graphics card the delay is mostly
+the block itself plus a safety margin for the moments the PC is busy. For comparison, two whole-file conversions with different random
+noise differ by 2.6 dB. The Buffer setting (effects editor) only adds delay on
+top (default 100 ms, which is below what any voice needs, so it adds none);
+sessions saved with the old default of 400 are moved to 100.
+
+Pitch comes from Echo's own pitch tracker (YIN), not RVC's neural pitch
+models (RMVPE, FCPE); octave mistakes on breathy or noisy speech are
+possible.
+
+## How it works
+
+Echo reads the .pth file itself (a PyTorch zip; the pickled settings are
+interpreted, never run) and builds the voice network as an ONNX graph for
+ONNX Runtime: the text encoder (6 transformer layers with relative
+positions), the normalizing flow run backwards, and the NSF HiFi-GAN vocoder.
+ContentVec is built the same way from its PyTorch weights. Per block:
+16 kHz audio → ContentVec features (50 a second) → blended towards the
+voice's index → doubled to 100 a second with the pitch of every 10 ms → the
+voice network → audio at the voice's rate.
+
+Tools (`echo_hwtest`): `torch-info <file>` lists a checkpoint;
+`rvc-convert <voice folder> <in.wav> <out.wav> [pitch] [match] [response 0-2]`
+converts a recording through the real-time effect (Quicker, Balanced,
+Smoother; default Balanced) and prints the delay; `rvc-offline` converts it in one
+piece; `faiss-info <index>` times retrieval.
+
+## Echo model packages (advanced)
+
+Besides RVC voices, a folder can hold an Echo package: an ONNX graph that
+takes and returns audio.
 
 ```
 %APPDATA%\Echo\models\my-voice\
@@ -72,8 +128,6 @@ real-time factor (must stay well below 1.0).
 
 Echo refuses manifests without a `license`. `consent` is shown in the UI.
 
-**ONNX I/O contract ("echo.voice-model v1")**
-
 | Name | Type/shape | Meaning |
 |---|---|---|
 | `<input>` | float32 `[1, N]` | mono audio at `sample_rate`, range -1..1. N = context + chunk samples (varies by ±1). |
@@ -81,16 +135,15 @@ Echo refuses manifests without a `license`. `consent` is shown in the UI.
 | `<output>` | float32 `[1, N]` | converted audio, same rate and length, time-aligned with the input |
 
 Echo uses the last `chunk` samples of each output (shifted back by the
-crossfade length) and crossfades successive chunks. Models that need
-features (HuBERT/ContentVec), F0 or speaker embeddings must compute them
-inside the graph.
+crossfade length) and crossfades successive chunks.
+`tools/make_test_model.py` builds a contract-compliant test graph (a
+low-pass filter).
 
-`tools/make_test_model.py` shows how to build a contract-compliant graph
-(it builds the pipeline test model, which is just a low-pass filter).
+## Privacy
 
-## Ethics and safety
-
-Echo includes no voices and does not download models. Use only voices you
-own or have explicit permission to use, follow the model's license, and do
-not use voice conversion to impersonate people, deceive, or commit fraud.
-Many platforms require disclosure of synthetic voices.
+Everything runs on this PC; nothing is uploaded. Official ONNX Runtime builds
+contain Microsoft trace logging (only collected if a Windows diagnostic
+trace session is active); Echo calls `DisableTelemetryEvents()` right after
+loading it. Echo loads ONNX Runtime only from these full paths, never from
+Windows' own copy: `<Echo>\ai\`, `%APPDATA%\Echo\ai\`, or the
+`ECHO_ONNXRUNTIME` environment variable.

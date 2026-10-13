@@ -19,6 +19,7 @@ enum class SourceKind : int {
     ProcessLoopback = 3,     // one application's audio (process tree)
     SystemExcludingEcho = 4, // all system audio except Echo itself (feedback-safe)
     ToneGenerator = 5,       // built-in test signal
+    Soundboard = 6,          // Echo's soundboard (sound pads)
 };
 
 const char* sourceKindName(SourceKind k);

@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <random>
 #include <thread>
 
 #include "TestUtil.h"
@@ -146,6 +147,12 @@ TEST_CASE("ai: the selected model is saved with the effect's state") {
     CHECK(e.saveState().empty());
     e.loadState("my-voice|gpu");
     CHECK(e.saveState() == "my-voice|gpu");
+    e.loadState("my-voice|cpu");
+    CHECK(e.saveState() == "my-voice|cpu");
+    CHECK_FALSE(e.prefersGpu());
+    // Saved before there was a choice: decided when the voice loads.
+    e.loadState("my-voice");
+    CHECK(e.saveState() == "my-voice");
 }
 
 TEST_CASE("ai: overload (inference slower than real time) stays bounded and recovers quickly") {
@@ -205,4 +212,60 @@ TEST_CASE("ai: overload (inference slower than real time) stays bounded and reco
     CHECK(toneAmplitude(out, start, n, 5000.0, 48000.0) < 0.01); // model output again (its low-pass)
     CHECK(allFinite(out));
     e.clearModel();
+}
+
+TEST_CASE("ai: the converted voice lands exactly at the reported latency") {
+    auto& rt = ai::OrtRuntime::instance();
+    std::string err;
+    if (!rt.ensureLoaded(&err)) {
+        MESSAGE("SKIPPED: ONNX Runtime not installed next to the tests (" << err << ")");
+        return;
+    }
+    ai::ModelManifest m;
+    REQUIRE(ai::loadManifest(dataDir("echo-test-lowpass"), m));
+    ai::AiVoiceEffect e;
+    e.prepare(48000, 480);
+    e.setParam("latency", 400.0f);
+    e.setModel(m, false);
+    for (int i = 0; i < 300 && e.status() != ai::AiStatus::Running; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    REQUIRE(e.status() == ai::AiStatus::Running);
+    // 440 Hz bursts of 60 ms at irregular gaps: their envelope shows any offset.
+    const int blocks = 400;
+    std::vector<float> in(static_cast<size_t>(blocks) * 480), out;
+    std::mt19937 rng(9);
+    std::uniform_int_distribution<int> gap(4800, 14400);
+    for (size_t start = 2400; start + 2880 < in.size(); start += 2880 + static_cast<size_t>(gap(rng)))
+        for (size_t i = start; i < start + 2880; ++i)
+            in[i] = 0.3f * static_cast<float>(std::sin(2.0 * 3.14159265358979 * 440.0 * (i / 48000.0)));
+    std::vector<float> l(480), r(480);
+    for (int b = 0; b < blocks; ++b) {
+        std::copy_n(in.begin() + b * 480, 480, l.begin());
+        std::copy_n(in.begin() + b * 480, 480, r.begin());
+        float* ch[2] = {l.data(), r.data()};
+        e.process(ch, 2, 480);
+        out.insert(out.end(), l.begin(), l.end());
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    const int lat = e.latencySamples();
+    // 1 ms envelopes over the last 2 seconds; the lag that lines them up.
+    auto env = [](const std::vector<float>& x, size_t from, size_t n) {
+        std::vector<double> e2(n / 48);
+        for (size_t k = 0; k < e2.size(); ++k)
+            for (size_t i = 0; i < 48; ++i) e2[k] += std::fabs(x[from + k * 48 + i]);
+        return e2;
+    };
+    const size_t n = 96000, from = out.size() - n - 4800;
+    const auto eo = env(out, from, n);
+    int bestLag = 0;
+    double best = -1.0;
+    for (int lag = -100; lag <= 100; ++lag) {
+        // Output at `from` should be the input `lat` earlier; try offsets around it.
+        const auto ei = env(in, from - static_cast<size_t>(lat) + static_cast<size_t>(lag * 48 + 4800) - 4800, n);
+        double c = 0.0;
+        for (size_t k = 0; k < eo.size(); ++k) c += eo[k] * ei[k];
+        if (c > best) best = c, bestLag = lag;
+    }
+    MESSAGE("reported latency " << lat / 48.0 << " ms; the converted voice is off by " << bestLag << " ms");
+    CHECK(std::abs(bestLag) <= 1);
 }

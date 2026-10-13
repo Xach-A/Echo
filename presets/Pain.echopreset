@@ -1,0 +1,123 @@
+{
+  "category": "Voice changer",
+  "chain": [
+    {
+      "bypass": false,
+      "params": {
+        "attack": 1,
+        "hold": 150,
+        "hysteresis": 6,
+        "range": -80,
+        "release": 150,
+        "threshold": -48
+      },
+      "type": "gate"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "hp_freq": 90,
+        "hp_on": 1,
+        "hp_slope": 1
+      },
+      "type": "filter"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "attack": 0.2,
+        "knee": 6,
+        "makeup": 18,
+        "ratio": 10,
+        "release": 80,
+        "threshold": -45
+      },
+      "type": "compressor"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "b1_freq": 250,
+        "b1_gain": -6,
+        "b4_freq": 2500,
+        "b4_gain": 6,
+        "b4_q": 0.8
+      },
+      "type": "eq"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "drive": 24,
+        "low_cut": 80,
+        "mix": 100,
+        "output": -8,
+        "tone": 16000,
+        "type": 2
+      },
+      "type": "distortion"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "drive": 20,
+        "low_cut": 70,
+        "mix": 100,
+        "output": -7,
+        "tone": 16000,
+        "type": 1
+      },
+      "type": "distortion",
+      "ui": "intensity",
+      "ui_makeup": 0.6000000238418579
+    },
+    {
+      "bypass": false,
+      "params": {
+        "b1_freq": 250,
+        "b1_gain": 6,
+        "b2_freq": 350,
+        "b2_gain": 3,
+        "b2_q": 0.9,
+        "b4_freq": 2500,
+        "b4_gain": -6,
+        "b4_q": 0.8
+      },
+      "type": "eq"
+    },
+    {
+      "bypass": true,
+      "params": {
+        "bits": 6,
+        "downsample": 4,
+        "mix": 60
+      },
+      "type": "bitcrusher",
+      "ui": "optional"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "drive": 6,
+        "low_cut": 20,
+        "mix": 100,
+        "output": -1,
+        "tone": 16000,
+        "type": 1
+      },
+      "type": "distortion"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "ceiling": -0.1,
+        "drive": 0
+      },
+      "type": "limiter"
+    }
+  ],
+  "description": "Blown-out mic, clipping as loud as it gets: crushed and distorted, but the words still come through.",
+  "format": "echo.chain-preset",
+  "name": "Pain",
+  "version": 1
+}

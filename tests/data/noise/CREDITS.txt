@@ -1,0 +1,12 @@
+Test material for the noise-removal tests (tests/test_typing.cpp). Not
+shipped with Echo.
+
+Excerpts (mono, 48 kHz 16-bit, peaks at -6 dBFS) of real recordings by Joseph
+Sardin from BigSoundBank, dedicated to the public domain (CC0 1.0,
+https://creativecommons.org/publicdomain/zero/1.0/):
+
+keyboard_quick.wav   6 s from "Quick Keyboard" (1734)   https://bigsoundbank.com/quick-keyboard-s1734.html
+keyboard_slow.wav    6 s from "Slow Keyboard" (1733)    https://bigsoundbank.com/slow-keyboard-s1733.html
+mouse_clicks.wav     "Raspberry Mouse, Single Click" (1735) and "Computer mouse" (0029),
+                     https://bigsoundbank.com/raspberry-mouse-single-click-s1735.html
+                     https://bigsoundbank.com/computer-mouse-s0029.html

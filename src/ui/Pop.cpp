@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "imgui_internal.h"
+#include "ui/Icons.h"
 #include "ui/Theme.h"
 
 namespace echo::ui::pop {
@@ -454,6 +455,16 @@ bool SendPill(const char* label, bool on, bool busB, float width, bool blocked) 
     return clicked;
 }
 
+float TileHeight(const char* icon, const char* name, const char* sub, float width) {
+    const float sc = S();
+    const float pad = 14.0f * sc, wrap = width - pad * 2;
+    float h = 12.0f * sc + 12.0f * sc;
+    if (icon && *icon) h += 28.0f * sc;
+    h += measure(fonts().semibold, 14.0f, name, nullptr, wrap).y + 2.0f * sc;
+    if (sub && *sub) h += measure(fonts().regular, 12.0f, sub, nullptr, wrap).y;
+    return h;
+}
+
 bool Tile(const char* id, const char* icon, const char* name, const char* sub, const char* corner, bool selected, ImVec2 size) {
     const float sc = S();
     const Palette& p = pal();
@@ -480,6 +491,134 @@ bool Tile(const char* id, const char* icon, const char* name, const char* sub, c
     y += measure(fonts().semibold, 14.0f, name, nullptr, size.x - pad * 2).y + 2.0f * sc;
     if (sub && *sub) text(dl, fonts().regular, 12.0f, ImVec2(pos.x + pad, y), p.text2, sub, nullptr, size.x - pad * 2);
     dl->PopClipRect();
+    return clicked;
+}
+
+PadEvents SoundPadTile(const char* id, const char* icon, const char* name, const char* keyText, const char* modeText,
+                       ImU32 tint, float progress, bool warn, ImVec2 size) {
+    const float sc = S();
+    const Palette& p = pal();
+    PadEvents ev;
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    ImGui::PushID(id);
+    ImGui::SetNextItemAllowOverlap();
+    ImGui::InvisibleButton("##pad", size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+    const bool hov = ImGui::IsItemHovered();
+    const bool held = ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    if (ImGui::IsItemActivated() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) ev.pressed = true;
+    if (ImGui::IsItemDeactivated()) ev.released = true;
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) ev.edit = true;
+    handCursor();
+    const ImVec2 b(pos.x + size.x, pos.y + size.y);
+    const bool playing = progress >= 0.0f;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float r = 16.0f * sc;
+    const bool dark = themeIsDark();
+    const ImU32 fill = mix(p.surface, tint, held ? (dark ? 0.55f : 0.45f) : playing ? (dark ? 0.42f : 0.32f)
+                                                                            : hov ? (dark ? 0.32f : 0.24f) : (dark ? 0.22f : 0.16f));
+    dl->AddRectFilled(ImVec2(pos.x, pos.y + 3.0f * sc), ImVec2(b.x, b.y + 3.0f * sc), A(p.shadow), r);
+    dl->AddRectFilled(ImVec2(pos.x, pos.y + (held ? 2.0f * sc : 0.0f)), ImVec2(b.x, b.y + (held ? 2.0f * sc : 0.0f)), A(fill), r);
+    dl->AddRect(ImVec2(pos.x, pos.y + (held ? 2.0f * sc : 0.0f)), ImVec2(b.x, b.y + (held ? 2.0f * sc : 0.0f)),
+                A(playing ? p.outline : hov ? p.border : p.outline), r, (playing ? 2.5f : 1.5f) * sc);
+    dl->PushClipRect(pos, ImVec2(b.x, b.y + 3.0f * sc), true);
+    const float pad = 14.0f * sc;
+    const float dy = held ? 2.0f * sc : 0.0f;
+    // Icon in a round badge of the pad's colour.
+    const ImVec2 ic(pos.x + pad + 15.0f * sc, pos.y + dy + pad + 15.0f * sc);
+    dl->AddCircleFilled(ic, 15.0f * sc, A(mix(tint, p.surface, dark ? 0.25f : 0.0f)), 24);
+    dl->AddCircle(ic, 15.0f * sc, A(p.outline), 24, 1.5f * sc);
+    if (icon && *icon) {
+        const char* glyph = warn ? ICON_WARNING : playing ? ICON_STOP : icon;
+        const ImVec2 is = measure(fonts().regular, 15.0f, glyph);
+        text(dl, fonts().regular, 15.0f, ImVec2(ic.x - is.x * 0.5f, ic.y - is.y * 0.5f), p.onAccent, glyph);
+    }
+    // Name (up to three lines).
+    const float wrap = size.x - pad * 2;
+    text(dl, fonts().semibold, 15.0f, ImVec2(pos.x + pad, pos.y + dy + pad + 38.0f * sc), p.text, name, nullptr, wrap);
+    // Key cap and mode along the bottom.
+    float by = b.y + dy - pad - 22.0f * sc;
+    if (playing) by -= 8.0f * sc;
+    if (keyText && *keyText) {
+        const ImVec2 ks = measure(fonts().semibold, 11.0f, keyText);
+        const float kw = std::min(ks.x + 14.0f * sc, size.x - pad * 2);
+        const ImVec2 k0(pos.x + pad, by), k1(pos.x + pad + kw, by + 22.0f * sc);
+        dl->AddRectFilled(k0, k1, A(p.surface), 7.0f * sc);
+        dl->AddRect(k0, k1, A(p.outline), 7.0f * sc, 1.2f * sc);
+        dl->PushClipRect(k0, k1, true);
+        text(dl, fonts().semibold, 11.0f, ImVec2(k0.x + 7.0f * sc, k0.y + (22.0f * sc - ks.y) * 0.5f), p.text, keyText);
+        dl->PopClipRect();
+    }
+    if (modeText && *modeText) {
+        const ImVec2 ms = measure(fonts().regular, 11.0f, modeText);
+        text(dl, fonts().regular, 11.0f, ImVec2(b.x - pad - ms.x, by + (22.0f * sc - ms.y) * 0.5f), p.text2, modeText);
+    }
+    // Play position.
+    if (playing) {
+        const ImVec2 t0(pos.x + pad, b.y + dy - pad - 4.0f * sc), t1(b.x - pad, b.y + dy - pad + 2.0f * sc);
+        dl->AddRectFilled(t0, t1, A(withAlpha(p.text, 0.12f)), 3.0f * sc);
+        dl->AddRectFilled(t0, ImVec2(t0.x + (t1.x - t0.x) * std::clamp(progress, 0.0f, 1.0f), t1.y), A(p.text), 3.0f * sc);
+    }
+    dl->PopClipRect();
+    // Edit button in the corner (shown on hover).
+    const ImVec2 eb(b.x - 30.0f * sc - 6.0f * sc, pos.y + 8.0f * sc + dy);
+    ImGui::SetCursorScreenPos(eb);
+    if (ImGui::InvisibleButton("##edit", ImVec2(30.0f * sc, 30.0f * sc))) ev.edit = true;
+    const bool editHov = ImGui::IsItemHovered();
+    if (editHov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    if (hov || editHov) {
+        const ImVec2 ec(eb.x + 15.0f * sc, eb.y + 15.0f * sc);
+        dl->AddCircleFilled(ec, 13.0f * sc, A(editHov ? p.surfaceAlt : p.surface), 20);
+        dl->AddCircle(ec, 13.0f * sc, A(p.outline), 20, 1.2f * sc);
+        const ImVec2 es = measure(fonts().regular, 13.0f, ICON_MORE);
+        text(dl, fonts().regular, 13.0f, ImVec2(ec.x - es.x * 0.5f, ec.y - es.y * 0.5f), p.text, ICON_MORE);
+    }
+    ImGui::SetCursorScreenPos(pos);
+    ImGui::Dummy(size);
+    ImGui::PopID();
+    return ev;
+}
+
+bool AddTile(const char* id, const char* label, ImVec2 size) {
+    const float sc = S();
+    const Palette& p = pal();
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    const bool clicked = ImGui::InvisibleButton(id, size);
+    const bool hov = ImGui::IsItemHovered();
+    handCursor();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 b(pos.x + size.x, pos.y + size.y);
+    if (hov) dl->AddRectFilled(pos, b, A(p.surfaceAlt), 16.0f * sc);
+    // Dashed outline.
+    const float dash = 7.0f * sc, gapLen = 5.0f * sc, inset = 1.0f * sc;
+    const ImU32 col = A(hov ? p.outline : p.border);
+    auto dashed = [&](ImVec2 a, ImVec2 c) {
+        const float len = std::hypot(c.x - a.x, c.y - a.y);
+        const ImVec2 d((c.x - a.x) / len, (c.y - a.y) / len);
+        for (float t = 0.0f; t < len; t += dash + gapLen) {
+            const float e = std::min(len, t + dash);
+            dl->AddLine(ImVec2(a.x + d.x * t, a.y + d.y * t), ImVec2(a.x + d.x * e, a.y + d.y * e), col, 1.5f * sc);
+        }
+    };
+    const float rr = 16.0f * sc;
+    dashed(ImVec2(pos.x + rr, pos.y + inset), ImVec2(b.x - rr, pos.y + inset));
+    dashed(ImVec2(pos.x + rr, b.y - inset), ImVec2(b.x - rr, b.y - inset));
+    dashed(ImVec2(pos.x + inset, pos.y + rr), ImVec2(pos.x + inset, b.y - rr));
+    dashed(ImVec2(b.x - inset, pos.y + rr), ImVec2(b.x - inset, b.y - rr));
+    dl->PathArcTo(ImVec2(pos.x + rr, pos.y + rr), rr - inset, IM_PI, IM_PI * 1.5f);
+    dl->PathStroke(col, 1.5f * sc);
+    dl->PathArcTo(ImVec2(b.x - rr, pos.y + rr), rr - inset, IM_PI * 1.5f, IM_PI * 2.0f);
+    dl->PathStroke(col, 1.5f * sc);
+    dl->PathArcTo(ImVec2(b.x - rr, b.y - rr), rr - inset, 0.0f, IM_PI * 0.5f);
+    dl->PathStroke(col, 1.5f * sc);
+    dl->PathArcTo(ImVec2(pos.x + rr, b.y - rr), rr - inset, IM_PI * 0.5f, IM_PI);
+    dl->PathStroke(col, 1.5f * sc);
+    const ImVec2 is = measure(fonts().regular, 22.0f, ICON_ADD);
+    const ImVec2 ls = measure(fonts().semibold, 14.0f, label, nullptr, size.x - 24.0f * sc);
+    const float total = is.y + 8.0f * sc + ls.y;
+    const float y0 = pos.y + (size.y - total) * 0.5f;
+    text(dl, fonts().regular, 22.0f, ImVec2(pos.x + (size.x - is.x) * 0.5f, y0), p.text2, ICON_ADD);
+    text(dl, fonts().semibold, 14.0f, ImVec2(pos.x + (size.x - ls.x) * 0.5f, y0 + is.y + 8.0f * sc), p.text2, label, nullptr,
+         size.x - 24.0f * sc);
     return clicked;
 }
 
