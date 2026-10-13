@@ -17,6 +17,7 @@
 #include "audio/AppRouting.h"
 #include "audio/Download.h"
 #include "audio/HotkeyService.h"
+#include "audio/Updater.h"
 #include "audio/VirtualCables.h"
 #include "audio/WasapiBackend.h"
 #include "core/Meter.h"
@@ -284,6 +285,17 @@ private:
     win::DownloadProgress ortProgress_;
     std::string ortError_;
     bool snapshotNoOrt_ = false; // snapshots: show the AI setup as before installing
+    // Updates (Settings > About; only when the user clicks).
+    struct UpdateState {
+        enum Stage { Idle, Checking, UpToDate, Available, Downloading, Failed } stage = Idle;
+        updates::Release release;
+        std::string error;
+    };
+    UpdateState update_;
+    std::future<UpdateState> updateCheck_;
+    std::future<std::pair<std::string, std::wstring>> updateDownload_; // error, installer
+    win::DownloadProgress updateProgress_;
+    void drawUpdates();
     bool snapshotShowAi_ = false;
     // VB-CABLE: download VB-Audio's pack, then open its installer.
     struct VbCableJob {

@@ -515,7 +515,7 @@ void EchoApp::drawAiPanel(StripModel& strip) {
     // How to add a voice.
     pop::Label("Add a voice");
     pop::Caption("1. Open the voices folder.\n"
-                 "2. Make a folder for the voice and put its .pth file in it (and its .index file, if it has one).\n"
+                 "2. Put the voice in it: the folder you downloaded, as it is, or its .pth file (and .index, if it has one).\n"
                  "3. Click Rescan, then Use on mic.");
     if (pop::SmallButton(ICON_FOLDER " Open the voices folder")) {
         std::filesystem::create_directories(paths::modelsDir(), ec);

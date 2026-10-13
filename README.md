@@ -5,8 +5,8 @@ multichannel mixing and routing, per-application capture, a 30-effect DSP librar
 neural background-noise suppression (on by default for microphones) and echo cancellation,
 pitch/formant voice changing, pitch correction ("autotune"), a soundboard, recording, and
 optional AI voices (RVC models, run on your PC). No accounts, subscriptions, ads or telemetry;
-Echo goes online only when you click Install VB-CABLE, Install the AI engine or Download
-ContentVec (the speech model RVC voices need).
+Echo goes online only when you click Install VB-CABLE, Install the AI engine, Download
+ContentVec (the speech model RVC voices need) or Check for updates.
 
 ![Home: push to talk, noise removal and quick voices](docs/images/home.png)
 
@@ -25,6 +25,13 @@ Echo isn't code-signed yet, so Windows warns before the first start:
 * **Smart App Control** (Windows Security > App & browser control), when it is on, blocks
   apps that aren't signed and offers no way to allow them. Echo then only runs with Smart
   App Control turned off; check what that means for your PC before you do it.
+
+## Updating
+
+Settings > About > **Check for updates** asks GitHub for a newer release (only when you click).
+If there is one, **Download and install** gets the installer from the release, checks it against
+the release's `SHA256SUMS.txt`, closes Echo, updates it and starts it again; your settings stay.
+A portable or self-built copy can't update itself and opens the release page instead.
 
 ## Quick start
 

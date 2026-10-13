@@ -1,5 +1,6 @@
 #include "ai/VoiceModel.h"
 
+#include <algorithm>
 #include <filesystem>
 
 #include "ai/RvcVoice.h"
@@ -62,9 +63,36 @@ std::vector<ModelManifest> scanModels(const std::wstring& modelsDir) {
     if (!fs::exists(modelsDir, ec)) return out;
     for (const auto& e : fs::directory_iterator(modelsDir, ec)) {
         if (!e.is_directory()) continue;
-        ModelManifest m;
-        loadManifest(e.path().wstring(), m);
-        out.push_back(std::move(m));
+        const std::wstring dir = e.path().wstring();
+        const std::string folder = wideToUtf8(e.path().filename().wstring());
+        std::vector<ModelManifest> voices;
+        if (!fs::exists(e.path() / L"model.json", ec)) voices = findRvcVoices(dir, true);
+        if (voices.size() <= 1) { // an Echo package, one RVC voice, or what is missing
+            ModelManifest m;
+            loadManifest(dir, m);
+            out.push_back(std::move(m));
+            continue;
+        }
+        // Several voices in one folder (a pack, or one voice saved at several
+        // training steps): one entry each, named apart by their file names.
+        for (auto& v : voices) {
+            const std::string file = wideToUtf8(fs::path(v.pthPath).stem().wstring());
+            v.id = folder + "/" + file;
+            if (v.name.empty()) v.name = folder;
+        }
+        std::vector<bool> shared(voices.size());
+        for (size_t k = 0; k < voices.size(); ++k)
+            shared[k] = std::count_if(voices.begin(), voices.end(), [&](const ModelManifest& o) { return o.name == voices[k].name; }) > 1;
+        for (size_t k = 0; k < voices.size(); ++k)
+            if (shared[k]) voices[k].name += " (" + wideToUtf8(fs::path(voices[k].pthPath).stem().wstring()) + ")";
+        for (auto& v : voices) out.push_back(std::move(v));
+    }
+    // Voices put straight into the voices folder, without a folder of their own.
+    for (auto& v : findRvcVoices(modelsDir, false)) {
+        if (!v.valid) continue;
+        v.id = wideToUtf8(fs::path(v.pthPath).filename().wstring());
+        if (v.name.empty()) v.name = wideToUtf8(fs::path(v.pthPath).stem().wstring());
+        out.push_back(std::move(v));
     }
     std::sort(out.begin(), out.end(), [](const ModelManifest& a, const ModelManifest& b) { return a.name < b.name; });
     return out;

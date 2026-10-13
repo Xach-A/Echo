@@ -19,46 +19,135 @@ const char* const kContentVecSha256 = "d8dd400e054ddf4e6be75dab5a2549db748cc99e7
 
 std::wstring contentVecPath() { return paths::appDataDir() + L"\\ai\\contentvec.bin"; }
 
-bool loadRvcManifest(const std::wstring& dir, ModelManifest& m) {
+namespace {
+
+std::wstring lowered(std::wstring s) {
+    std::transform(s.begin(), s.end(), s.begin(), ::towlower);
+    return s;
+}
+
+// The .index that fits a voice best: in the voice's own folder, then with
+// the voice's name in its own, then RVC's "added_" (searchable) indexes.
+// "trained_" indexes hold no voice features and are never used, and neither
+// is an index that belongs to another voice found (in its folder or named
+// after it).
+std::wstring bestIndex(const std::filesystem::path& pth, const std::vector<std::filesystem::path>& indexes,
+                       const std::vector<std::filesystem::path>& allPths) {
+    const std::wstring stem = lowered(pth.stem().wstring());
+    int best = -1;
+    std::wstring out;
+    for (const auto& ix : indexes) {
+        const std::wstring name = lowered(ix.filename().wstring());
+        if (name.rfind(L"trained", 0) == 0) continue;
+        const bool mine = ix.parent_path() == pth.parent_path() || (!stem.empty() && name.find(stem) != std::wstring::npos);
+        bool other = false;
+        for (const auto& o : allPths) {
+            if (o == pth) continue;
+            const std::wstring os = lowered(o.stem().wstring());
+            other |= ix.parent_path() == o.parent_path() || (!os.empty() && name.find(os) != std::wstring::npos);
+        }
+        if (other && !mine) continue;
+        int score = 0;
+        if (ix.parent_path() == pth.parent_path()) score += 4;
+        if (!stem.empty() && name.find(stem) != std::wstring::npos) score += 2;
+        if (name.rfind(L"added", 0) == 0) score += 1;
+        if (score > best) {
+            best = score;
+            out = ix.wstring();
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+std::vector<ModelManifest> findRvcVoices(const std::wstring& dir, bool subfolders) {
     namespace fs = std::filesystem;
     std::error_code ec;
-    m.kind = "rvc";
-    m.dir = dir;
-    m.id = wideToUtf8(fs::path(dir).filename().wstring());
-    m.name = m.id;
-    for (const auto& e : fs::directory_iterator(dir, ec)) {
-        if (!e.is_regular_file()) continue;
-        std::wstring ext = e.path().extension().wstring();
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
-        if (ext == L".pth" && m.pthPath.empty()) m.pthPath = e.path().wstring();
-        if (ext == L".index" && m.indexPath.empty()) m.indexPath = e.path().wstring();
+    std::vector<fs::path> pths, indexes;
+    auto consider = [&](const fs::path& p) {
+        const std::wstring ext = lowered(p.extension().wstring());
+        if (ext == L".pth") pths.push_back(p);
+        else if (ext == L".index") indexes.push_back(p);
+    };
+    if (subfolders) {
+        // Four folders deep at most, and not more than 5000 entries.
+        int seen = 0;
+        for (auto it = fs::recursive_directory_iterator(dir, fs::directory_options::skip_permission_denied, ec);
+             !ec && it != fs::recursive_directory_iterator() && seen < 5000; it.increment(ec), ++seen) {
+            if (it->is_directory(ec) && it.depth() >= 3) it.disable_recursion_pending();
+            else if (it->is_regular_file(ec)) consider(it->path());
+        }
+    } else {
+        for (const auto& e : fs::directory_iterator(dir, ec))
+            if (e.is_regular_file(ec)) consider(e.path());
     }
-    if (m.pthPath.empty()) {
+    // Files nearer the top first, then by path (a stable order).
+    auto depth = [&](const fs::path& p) {
+        const fs::path rel = p.lexically_relative(dir);
+        return std::distance(rel.begin(), rel.end());
+    };
+    std::sort(pths.begin(), pths.end(), [&](const fs::path& a, const fs::path& b) {
+        const auto da = depth(a), db = depth(b);
+        return da != db ? da < db : a < b;
+    });
+    // The playable voices (training checkpoints and other .pth files don't load).
+    std::vector<std::pair<fs::path, RvcInfo>> found;
+    for (const auto& pth : pths) {
+        RvcModel rvc;
+        std::string err;
+        if (rvc.load(pth.wstring(), &err)) found.emplace_back(pth, rvc.info());
+        if (found.size() >= 32) break;
+    }
+    std::vector<fs::path> voicePaths;
+    for (const auto& f : found) voicePaths.push_back(f.first);
+    std::vector<ModelManifest> out;
+    for (const auto& [pth, i] : found) {
+        ModelManifest m;
+        m.kind = "rvc";
+        m.dir = dir;
+        m.id = wideToUtf8(pth.stem().wstring());
+        m.pthPath = pth.wstring();
+        m.indexPath = bestIndex(pth, indexes, voicePaths);
+        m.sizeBytes = fs::file_size(pth, ec);
+        m.name = i.name; // empty: the caller names it after its folder or file
+        m.sampleRate = i.sampleRate;
+        m.description = "RVC " + i.version + " voice, " + std::to_string(i.sampleRate / 1000) + " kHz" +
+                        (m.indexPath.empty() ? "" : ", with index");
+        m.license = "Not stated in RVC files: use only voices you have the right to use";
+        // Blocks of 250 ms with 400 ms before them for context; the newest
+        // 60 ms only blend into the next block (the networks see no future).
+        // The AI voice's Response setting chooses the sizes it really uses.
+        m.chunkMs = 250;
+        m.contextMs = 400;
+        m.crossfadeMs = 60;
+        m.valid = true;
+        out.push_back(std::move(m));
+    }
+    if (out.empty() && !pths.empty()) {
+        ModelManifest m;
+        m.kind = "rvc";
+        m.dir = dir;
+        m.error = "No playable voice here: the .pth files are not RVC voice models (G_ and D_ files are training "
+                  "checkpoints, not voices)";
+        out.push_back(std::move(m));
+    }
+    return out;
+}
+
+bool loadRvcManifest(const std::wstring& dir, ModelManifest& m) {
+    const std::string folder = wideToUtf8(std::filesystem::path(dir).filename().wstring());
+    std::vector<ModelManifest> voices = findRvcVoices(dir, true);
+    if (voices.empty()) {
+        m.kind = "rvc";
+        m.dir = dir;
         m.error = "No voice found: put the RVC .pth file (and its .index, if it has one) in this folder";
-        return false;
+    } else {
+        m = std::move(voices.front());
     }
-    m.sizeBytes = fs::file_size(m.pthPath, ec);
-    RvcModel rvc;
-    std::string err;
-    if (!rvc.load(m.pthPath, &err)) {
-        m.error = err;
-        return false;
-    }
-    const RvcInfo& i = rvc.info();
-    if (!i.name.empty()) m.name = i.name;
-    m.sampleRate = i.sampleRate;
-    m.description = "RVC " + i.version + " voice, " + std::to_string(i.sampleRate / 1000) + " kHz" +
-                    (m.indexPath.empty() ? "" : ", with index");
-    m.license = "Not stated in RVC files: use only voices you have the right to use";
-    // Blocks of 250 ms with 400 ms before them for context; the newest
-    // 60 ms only blend into the next block (the networks see no future).
-    // (Measured on an RVC v2 voice: closer to whole-file conversion than
-    // shorter context, at about half of real time on a 12-core CPU.)
-    m.chunkMs = 250;
-    m.contextMs = 400;
-    m.crossfadeMs = 60;
-    m.valid = true;
-    return true;
+    m.id = folder;
+    if (m.name.empty()) m.name = folder;
+    return m.valid;
 }
 
 bool RvcVoice::load(const ModelManifest& m, bool preferGpu, int samples, std::string* error, const std::wstring& encoder) {

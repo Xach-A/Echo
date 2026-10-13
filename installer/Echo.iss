@@ -9,7 +9,7 @@
   #define AppName "Echo"
 #endif
 #ifndef AppVersion
-  #define AppVersion "0.1.0"
+  #define AppVersion "0.1.1"
 #endif
 #ifndef StageDir
   #define StageDir "..\build\package\stage"
@@ -63,12 +63,20 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppName}.exe"; Tasks: deskt
 
 [Run]
 Filename: "{app}\{#AppName}.exe"; Description: "Start {#AppName} now"; Flags: nowait postinstall skipifsilent
+; An update started from Echo (Settings > About) runs quietly with /update=1:
+; start the new version when it's done.
+Filename: "{app}\{#AppName}.exe"; Flags: nowait runasoriginaluser; Check: StartedByEchoUpdate
 
 [UninstallDelete]
 ; Files Echo may create next to the executable (e.g. a user-installed ONNX Runtime).
 Type: filesandordirs; Name: "{app}\ai"
 
 [Code]
+function StartedByEchoUpdate: Boolean;
+begin
+  Result := ExpandConstant('{param:update|0}') = '1';
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   SettingsDir, LocalDir: String;

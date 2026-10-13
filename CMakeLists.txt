@@ -4,8 +4,9 @@ cmake_minimum_required(VERSION 3.24)
 set(ECHO_APP_NAME "Echo" CACHE STRING "Display name of the application")
 set(ECHO_APP_ID "Echo" CACHE STRING "Identifier used for the settings folder and mutex")
 set(ECHO_APP_PUBLISHER "Echo contributors" CACHE STRING "Publisher shown in version info")
+set(ECHO_UPDATE_REPO "Xach-A/Echo" CACHE STRING "GitHub repository (owner/name) whose releases Echo checks for updates")
 
-project(Echo VERSION 0.1.0 LANGUAGES C CXX)
+project(Echo VERSION 0.1.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -133,6 +134,10 @@ add_custom_target(echo_docs ALL DEPENDS ${CMAKE_BINARY_DIR}/docs.stamp)
 file(GLOB ECHO_UI_SOURCES CONFIGURE_DEPENDS src/ui/*.cpp src/app/*.cpp)
 if(ECHO_UI_SOURCES)
 add_executable(Echo WIN32 ${ECHO_UI_SOURCES} resources/Echo.rc)
+# The resource compiler doesn't track headers: rebuild the version info (and
+# icon) when the version changes.
+set_source_files_properties(resources/Echo.rc PROPERTIES OBJECT_DEPENDS
+    "${CMAKE_BINARY_DIR}/generated/Version.h;${CMAKE_SOURCE_DIR}/resources/echo.ico")
 target_link_libraries(Echo PRIVATE echo_audio imgui comdlg32 shcore dbghelp dwmapi windowscodecs)
 if(NOT MSVC)
     target_link_options(Echo PRIVATE -municode)

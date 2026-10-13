@@ -7,9 +7,23 @@ them.
 ## Add a voice
 
 1. In Echo: **Voices > AI voice > Set up AI voice > Open the voices folder**.
-2. Make a folder for the voice (any name) and put the voice's **.pth** file in
-   it, and its **.index** file if it has one.
+2. Put the voice in it: the folder you downloaded, as it is, or just the
+   voice's **.pth** file (and its **.index** file, if it has one).
 3. Click **Rescan**, then **Use on mic**.
+
+Echo looks through each folder and its subfolders (four levels), so the usual
+download layouts work, e.g. RVC's own `weights\<name>.pth` with
+`logs\<name>\added_….index`:
+
+* Every .pth that is a voice model becomes a voice; training checkpoints
+  (`G_…` and `D_…` files) and other .pth files are skipped.
+* Each voice gets the .index that fits it best: one in its own folder, then one
+  named after it, then RVC's `added_…` index. `trained_…` indexes hold no voice
+  features and are never used, and an index that belongs to another voice in
+  the same folder is never borrowed.
+* A folder with several voices (a pack, or one voice saved at several training
+  steps) shows each of them, named apart by their file names.
+* `echo_hwtest voices` lists what Echo finds and which files it picked.
 
 The first time, Echo also needs two things (the panel shows what's missing):
 

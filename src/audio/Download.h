@@ -20,6 +20,12 @@ struct DownloadProgress {
 bool downloadFile(const std::string& url, const std::wstring& dest, uint64_t expectedSize, const std::string& sha256Hex,
                   DownloadProgress& progress, std::string* error);
 
+// Fetches a small text resource over HTTPS (at most `maxBytes`), with extra
+// request `headers` ("Name: value" lines, each ending in CR LF, or nullptr). `httpStatus` gets the
+// server's status code; anything but 200 fails. Blocks.
+bool httpGetText(const std::string& url, const wchar_t* headers, std::string& out, size_t maxBytes, int* httpStatus,
+                 std::string* error);
+
 // SHA-256 of a file, lowercase hex ("" if it can't be read).
 std::string sha256File(const std::wstring& path);
 

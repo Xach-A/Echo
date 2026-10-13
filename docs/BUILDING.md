@@ -101,6 +101,8 @@ build/release/bin/echo_hwtest.exe rvc-offline <voice folder> in.wav out.wav 12 5
 build/release/bin/echo_hwtest.exe faiss-info voice.index   # loads an RVC index and times retrieval
 build/release/bin/echo_hwtest.exe vbcable-download <folder>   # VB-CABLE's pack: download, checksum, unpack (doesn't install)
 build/release/bin/echo_hwtest.exe dml-probe   # which ONNX operators the graphics card (DirectML build) accepts
+build/release/bin/echo_hwtest.exe voices      # the voices Echo finds in its voices folder, and their files
+build/release/bin/echo_hwtest.exe update-check 0.0.9 <folder>   # as version 0.0.9: find the newest release, download and check its installer
 build/release/bin/echo_hwtest.exe rvc-convert <voice folder> in.wav out.wav 0 50 1 1   # the same on the graphics card
 build/release/bin/echo_hwtest.exe perf          # UI-thread device work timing
 ```

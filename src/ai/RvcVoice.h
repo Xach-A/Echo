@@ -27,7 +27,15 @@ extern const char* const kContentVecUrl;
 extern const char* const kContentVecSha256;
 constexpr uint64_t kContentVecBytes = 378342945;
 
-// An RVC voice folder: its .pth (and .index); fills the manifest.
+// The RVC voices in a folder, also in its subfolders when `subfolders` is
+// set (downloads often nest them, e.g. weights/x.pth and logs/x/added_*.index):
+// every .pth that is a playable voice (training checkpoints such as G_/D_
+// files are skipped), each paired with the .index that fits it best (same
+// folder, then a name containing the voice's, then "added_" over "trained_").
+// Nothing playable: one manifest with the error (when a .pth was found) or none.
+std::vector<ModelManifest> findRvcVoices(const std::wstring& dir, bool subfolders);
+
+// An RVC voice folder: its first voice; fills the manifest.
 bool loadRvcManifest(const std::wstring& dir, ModelManifest& m);
 
 class RvcVoice : public VoiceConverter {

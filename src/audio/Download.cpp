@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <vector>
 
+#include "Version.h"
 #include "core/Text.h"
 
 namespace echo::win {
@@ -62,8 +63,11 @@ std::string sha256File(const std::wstring& path) {
     return sha.hex();
 }
 
-bool downloadFile(const std::string& url, const std::wstring& dest, uint64_t expectedSize, const std::string& sha256Hex,
-                  DownloadProgress& progress, std::string* error) {
+namespace {
+
+// Sends an HTTPS GET (redirects followed) and waits for the answer's headers.
+bool openGet(const std::string& url, const wchar_t* headers, Handle& session, Handle& connect, Handle& request, DWORD& status,
+             std::string* error) {
     auto fail = [&](const std::string& why) {
         if (error) *error = why;
         return false;
@@ -77,19 +81,64 @@ bool downloadFile(const std::string& url, const std::wstring& dest, uint64_t exp
     uc.lpszUrlPath = path;
     uc.dwUrlPathLength = 2047;
     if (!WinHttpCrackUrl(wurl.c_str(), 0, 0, &uc) || uc.nScheme != INTERNET_SCHEME_HTTPS) return fail("Bad download address");
-    Handle session, connect, request;
-    session.h = WinHttpOpen(L"Echo/0.1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    session.h = WinHttpOpen(L"Echo/" ECHO_VERSION_WSTRING, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
+                            WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session.h) return fail("Can't start the download");
     connect.h = WinHttpConnect(session.h, host, uc.nPort, 0);
     request.h = connect.h ? WinHttpOpenRequest(connect.h, L"GET", path, nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                                                WINHTTP_FLAG_SECURE)
                           : nullptr;
-    if (!request.h || !WinHttpSendRequest(request.h, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+    if (!request.h ||
+        !WinHttpSendRequest(request.h, headers ? headers : WINHTTP_NO_ADDITIONAL_HEADERS, headers ? static_cast<DWORD>(-1) : 0,
+                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
         !WinHttpReceiveResponse(request.h, nullptr))
         return fail("Can't reach " + wideToUtf8(host) + " (check your internet connection)");
-    DWORD status = 0, len = sizeof(status);
+    status = 0;
+    DWORD len = sizeof(status);
     WinHttpQueryHeaders(request.h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &len,
                         WINHTTP_NO_HEADER_INDEX);
+    return true;
+}
+
+} // namespace
+
+bool httpGetText(const std::string& url, const wchar_t* headers, std::string& out, size_t maxBytes, int* httpStatus,
+                 std::string* error) {
+    Handle session, connect, request;
+    DWORD status = 0;
+    out.clear();
+    if (!openGet(url, headers, session, connect, request, status, error)) return false;
+    if (httpStatus) *httpStatus = static_cast<int>(status);
+    std::vector<char> buf(1 << 16);
+    for (;;) {
+        DWORD got = 0;
+        if (!WinHttpReadData(request.h, buf.data(), static_cast<DWORD>(buf.size()), &got)) {
+            if (error) *error = "The download was interrupted";
+            return false;
+        }
+        if (got == 0) break;
+        out.append(buf.data(), got);
+        if (out.size() > maxBytes) {
+            if (error) *error = "The answer is larger than expected";
+            return false;
+        }
+    }
+    if (status != 200) {
+        if (error) *error = "The server answered " + std::to_string(status);
+        return false;
+    }
+    return true;
+}
+
+bool downloadFile(const std::string& url, const std::wstring& dest, uint64_t expectedSize, const std::string& sha256Hex,
+                  DownloadProgress& progress, std::string* error) {
+    auto fail = [&](const std::string& why) {
+        if (error) *error = why;
+        return false;
+    };
+    Handle session, connect, request;
+    DWORD status = 0;
+    if (!openGet(url, nullptr, session, connect, request, status, error)) return false;
     if (status != 200) return fail("The server answered " + std::to_string(status));
     progress.total = expectedSize;
     progress.done = 0;
