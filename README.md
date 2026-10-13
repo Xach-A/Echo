@@ -19,12 +19,13 @@ ContentVec (the speech model RVC voices need) or Check for updates.
 Get `Echo-<version>-setup-win64.exe` (or the portable zip) from the
 [Releases](../../releases) page. `SHA256SUMS.txt` next to them lists their checksums.
 
-Echo isn't code-signed yet, so Windows warns before the first start:
+Echo isn't code-signed, so Windows may warn before the first start:
 
 * **"Windows protected your PC"** (SmartScreen): click **More info**, then **Run anyway**.
-* **Smart App Control** (Windows Security > App & browser control), when it is on, blocks
-  apps that aren't signed and offers no way to allow them. Echo then only runs with Smart
-  App Control turned off; check what that means for your PC before you do it.
+* **"An Application Control policy has blocked this file"** (Smart App Control): turn Smart
+  App Control off in Windows Security > App & browser control > Smart App Control settings,
+  install Echo, then turn it back on if you want it (recent Windows 11 versions allow that
+  without reinstalling Windows). An update can be blocked the same way.
 
 ## Updating
 
@@ -64,19 +65,6 @@ python -m pip install --user cmake ninja
 * `docs/ARCHITECTURE.md` — design decisions, real-time model, clocking, AI pipeline
 * `docs/BUILDING.md`, `docs/TESTING.md`, `docs/TROUBLESHOOTING.md`
 * `docs/VIRTUAL_DEVICES.md`, `docs/AI_VOICE.md`, `docs/FILE_FORMATS.md`
-
-## Code signing policy
-
-Release files are built from this repository by GitHub Actions
-(`.github/workflows/build.yml`: build, tests, installer and checksums), not on a
-personal computer. They are not code-signed yet.
-
-* Committers and reviewers: [Xach-A](https://github.com/Xach-A)
-* Approvers: [Xach-A](https://github.com/Xach-A)
-
-Privacy: this program will not transfer any information to other networked systems unless
-specifically requested by the user or the person installing or operating it (Echo goes online
-only for its download buttons and Check for updates).
 
 ## License
 
