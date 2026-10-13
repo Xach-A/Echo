@@ -1,5 +1,5 @@
 # Builds, tests and packages Echo from source on GitHub's Windows machines, so
-# every release file can be traced to this repository (and later be signed).
+# every change is tested on a clean PC and the release files can be built there.
 name: Build
 
 on:
