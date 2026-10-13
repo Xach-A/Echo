@@ -34,7 +34,9 @@ Optional:
 ```
 
 `build.ps1` finds LLVM-MinGW on PATH or in the winget package folder, and
-CMake/Ninja on PATH or in the Python user Scripts folder.
+CMake/Ninja on PATH or in the Python user Scripts folder. If Echo is running from
+the build folder (it locks `Echo.exe`), the script asks it to save and quit
+first (`Echo.exe --quit`) and starts it again when the build is done.
 
 Manual equivalent (LLVM-MinGW):
 
@@ -135,7 +137,8 @@ available on Windows; ThreadSanitizer is not supported on Windows).
 * LLVM-MinGW ships `lldb`; MSVC builds work with Visual Studio's debugger.
 * Crash dumps: `%LOCALAPPDATA%\Echo\crashes\*.dmp`.
 * Command line: `--safe-mode` (effects bypassed, audio not started),
-  `--reset-settings` (moves `session.json` aside), `--minimized`.
+  `--reset-settings` (moves `session.json` aside), `--minimized`, `--quit` (asks the
+  running Echo to save and exit, waits up to 15 s; exit code 0 when none runs).
 
 ## 6. Project layout
 

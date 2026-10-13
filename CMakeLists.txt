@@ -78,7 +78,7 @@ endif()
 file(GLOB ECHO_CORE_SOURCES CONFIGURE_DEPENDS
     src/core/*.cpp src/dsp/*.cpp src/dsp/effects/*.cpp src/session/*.cpp src/ai/*.cpp)
 add_library(echo_core STATIC ${ECHO_CORE_SOURCES})
-target_link_libraries(echo_core PUBLIC echo_options avrt rnnoise dxgi)
+target_link_libraries(echo_core PUBLIC echo_options avrt rnnoise dxgi secur32)
 
 # ---------------------------------------------------------------------------
 # Windows audio platform layer (WASAPI, sessions, virtual cables)

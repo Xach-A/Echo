@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Echo</title>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2c3139"/><stop offset="1" stop-color="#13151a"/></linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4e545e"/><stop offset="1" stop-color="#22262d"/></linearGradient>
+    <linearGradient id="head" x1="0" y1="38.5" x2="0" y2="109.16" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#76ff6c"/><stop offset="1" stop-color="#2cd63a"/></linearGradient>
+    <linearGradient id="holder" x1="0" y1="115.05" x2="0" y2="217.5" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#52f054"/><stop offset="1" stop-color="#28c438"/></linearGradient>
+    <linearGradient id="body" x1="87.96" y1="0" x2="168.04" y2="0" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#484f5a"/><stop offset="1" stop-color="#181b20"/></linearGradient>
+    <radialGradient id="shine" cx="111.51" cy="59.7" r="16.49" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fff" stop-opacity="0.35"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="4.71"/></filter>
+    <clipPath id="headclip"><path d="M85.61 109.16V80.9A42.39 42.39 0 0 1 170.39 80.9V109.16Z"/></clipPath>
+  </defs>
+  <rect x="10.24" y="10.24" width="235.52" height="235.52" rx="51.81" fill="url(#rim)"/>
+  <rect x="14.01" y="14.01" width="227.98" height="227.98" rx="48.05" fill="url(#tile)"/>
+  <g fill="#000" opacity="0.45" filter="url(#shadow)" transform="translate(0 5.18)"><path d="M85.61 109.16V80.9A42.39 42.39 0 0 1 170.39 80.9V109.16Z"/><rect x="82.07" y="109.16" width="91.85" height="8.95" rx="2.83"/><path d="M87.96 118.11H168.04V145.66A40.04 40.04 0 0 1 128.0 185.7H128.0A40.04 40.04 0 0 1 87.96 145.66Z"/><rect x="119.76" y="175.1" width="16.49" height="48.28"/><path d="M58.52 115.05V148.02A69.48 69.48 0 0 0 197.48 148.02V115.05" fill="none" stroke="#000" stroke-width="8.48"/></g>
+  <path d="M58.52 115.05V148.02A69.48 69.48 0 0 0 197.48 148.02V115.05" fill="none" stroke="url(#holder)" stroke-width="8.48"/>
+  <rect x="50.04" y="102.56" width="16.96" height="20.25" rx="8.48" fill="#52f054"/>
+  <rect x="189.0" y="102.56" width="16.96" height="20.25" rx="8.48" fill="#52f054"/>
+  <rect x="119.76" y="175.1" width="16.49" height="48.28" rx="4.71" fill="#181a1f"/>
+  <rect x="115.05" y="209.25" width="25.91" height="9.42" rx="2.36" fill="#0c0d10"/>
+  <path d="M87.96 118.11H168.04V145.66A40.04 40.04 0 0 1 128.0 185.7H128.0A40.04 40.04 0 0 1 87.96 145.66Z" fill="url(#body)"/>
+  <rect x="82.07" y="109.16" width="91.85" height="8.95" rx="2.83" fill="#0c0d10"/>
+  <path d="M85.61 109.16V80.9A42.39 42.39 0 0 1 170.39 80.9V109.16Z" fill="url(#head)"/>
+  <g clip-path="url(#headclip)">
+    <rect x="85.61" y="100.92" width="84.79" height="8.24" fill="#22b030"/>
+    <circle cx="111.51" cy="59.7" r="16.49" fill="url(#shine)"/>
+  </g>
+</svg>

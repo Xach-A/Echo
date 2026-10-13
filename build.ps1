@@ -11,6 +11,9 @@
   ./build.ps1 -Config Debug
   ./build.ps1 -Test               # build + run unit tests
   ./build.ps1 -Package            # build + tests + portable zip + installer
+
+  A running Echo from this build folder is asked to save and quit first (it
+  locks Echo.exe) and is started again afterwards.
 #>
 param(
     [ValidateSet('Debug', 'Release', 'RelWithDebInfo')]
@@ -68,21 +71,44 @@ if ($env:VCINSTALLDIR -and (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
                       '-DCMAKE_RC_COMPILER=llvm-windres')
 }
 
-if ($Clean -and (Test-Path $BuildDir)) { Remove-Item -Recurse -Force $BuildDir }
-
-& $cmake -S $root -B $BuildDir -G Ninja "-DCMAKE_BUILD_TYPE=$Config" @compilerArgs
-if ($LASTEXITCODE) { throw 'CMake configure failed' }
-& $cmake --build $BuildDir --parallel
-if ($LASTEXITCODE) { throw 'Build failed' }
-
-if ($Test -or $Package) {
-    & (Join-Path $BuildDir 'bin/echo_tests.exe')
-    if ($LASTEXITCODE) { throw 'Unit tests failed' }
+# --- a running Echo locks Echo.exe: ask it to save and quit (like its tray
+#     menu's Quit), and start it again when the build is done ---
+$echoExe = [IO.Path]::GetFullPath((Join-Path $BuildDir 'bin/Echo.exe'))
+$restartEcho = $false
+$running = Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($echoExe)) -ErrorAction SilentlyContinue |
+    Where-Object { $_.Path -and $_.Path -ieq $echoExe }
+if ($running) {
+    Write-Host 'Asking the running Echo to save and quit...'
+    $quit = Start-Process -FilePath $echoExe -ArgumentList '--quit' -Wait -PassThru
+    if ($quit.ExitCode -ne 0) {
+        throw 'Echo is still running: quit it from its tray icon (right-click > Quit Echo), then build again.'
+    }
+    $restartEcho = $true
 }
 
-if ($Package) {
-    & (Join-Path $root 'installer/package.ps1') -BuildDir $BuildDir
-    if ($LASTEXITCODE) { throw 'Packaging failed' }
-}
+try {
+    if ($Clean -and (Test-Path $BuildDir)) { Remove-Item -Recurse -Force $BuildDir }
 
-Write-Host "Build complete: $BuildDir/bin"
+    & $cmake -S $root -B $BuildDir -G Ninja "-DCMAKE_BUILD_TYPE=$Config" @compilerArgs
+    if ($LASTEXITCODE) { throw 'CMake configure failed' }
+    & $cmake --build $BuildDir --parallel
+    if ($LASTEXITCODE) { throw 'Build failed' }
+
+    if ($Test -or $Package) {
+        & (Join-Path $BuildDir 'bin/echo_tests.exe')
+        if ($LASTEXITCODE) { throw 'Unit tests failed' }
+    }
+
+    if ($Package) {
+        & (Join-Path $root 'installer/package.ps1') -BuildDir $BuildDir
+        if ($LASTEXITCODE) { throw 'Packaging failed' }
+    }
+
+    Write-Host "Build complete: $BuildDir/bin"
+} finally {
+    if ($restartEcho -and (Test-Path $echoExe)) {
+        # Through Explorer, as if double-clicked.
+        Start-Process -FilePath (Join-Path $env:WINDIR 'explorer.exe') -ArgumentList "`"$echoExe`""
+        Write-Host 'Started Echo again.'
+    }
+}
