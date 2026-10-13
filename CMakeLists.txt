@@ -121,7 +121,7 @@ add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/sounds.stamp
     COMMENT "Copying the built-in sounds")
 add_custom_target(echo_sounds ALL DEPENDS ${CMAKE_BINARY_DIR}/sounds.stamp)
 # The documentation too (Settings > About > Open documentation).
-file(GLOB ECHO_DOC_FILES CONFIGURE_DEPENDS docs/*)
+file(GLOB ECHO_DOC_FILES LIST_DIRECTORIES false CONFIGURE_DEPENDS docs/*.md)
 add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/docs.stamp
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/docs
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ECHO_DOC_FILES} ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/docs

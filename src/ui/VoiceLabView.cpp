@@ -14,6 +14,7 @@
 #include "ai/AiVoiceEffect.h"
 #include "ai/RvcVoice.h"
 #include "audio/Download.h"
+#include "audio/OrtInstall.h"
 #include "ai/OrtRuntime.h"
 #include "core/Text.h"
 #include "dsp/MusicTheory.h"
@@ -528,23 +529,44 @@ void EchoApp::drawAiPanel(StripModel& strip) {
     // What AI voices need.
     pop::Divider();
     pop::Label("Needed once");
-    if (rt.loaded()) {
-        ImGui::TextColored(toVec4(p.good), ICON_CHECK " ONNX Runtime %s", rt.version().c_str());
-    } else {
-        ImGui::TextColored(toVec4(p.warn), ICON_WARNING " ONNX Runtime (Microsoft's free AI engine) is missing.");
-        pop::Caption("Run tools\\fetch_onnxruntime.ps1 from Echo's folder (add -Gpu to use the graphics card), or copy "
-                     "onnxruntime.dll into the ai folder next to Echo.exe.");
-        if (pop::SmallButton(ICON_FOLDER " Open the ai folder")) {
-            const std::wstring dir = paths::executableDir() + L"\\ai";
-            std::filesystem::create_directories(dir, ec);
-            ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-        }
-        ImGui::SameLine();
-        if (pop::SmallButton(ICON_REFRESH " Check again")) {
+    const bool ortInstalling = ortInstall_.valid() && ortInstall_.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
+    if (ortInstall_.valid() && !ortInstalling) {
+        ortError_ = ortInstall_.get();
+        if (ortError_.empty()) {
             std::string err;
-            if (rt.ensureLoaded(&err)) toast("ONNX Runtime found", 1);
-            else toast(err, 2);
+            if (rt.ensureLoaded(&err)) toast("The AI engine is ready", 1);
+            else ortError_ = err;
         }
+    }
+    if (rt.loaded() && !snapshotNoOrt_) {
+        ImGui::TextColored(toVec4(p.good), ICON_CHECK " AI engine (ONNX Runtime %s)%s", rt.version().c_str(),
+                           rt.hasGpu() ? ", can use the graphics card" : "");
+    } else if (ortInstalling) {
+        const double done = ortProgress_.done.load() / 1048576.0, total = win::kOrtBytes / 1048576.0;
+        char label[64];
+        std::snprintf(label, sizeof(label), "Downloading the AI engine: %.0f of %.0f MB", done, total);
+        ImGui::ProgressBar(static_cast<float>(done / total), ImVec2(std::min(ImGui::GetContentRegionAvail().x, 420.0f * sc), 0), label);
+        ImGui::SameLine();
+        if (pop::SmallButton("Cancel##ort")) ortProgress_.cancel = true;
+    } else {
+        ImGui::TextColored(toVec4(p.warn), ICON_WARNING " AI voices need Echo's AI engine.");
+        pop::Caption("ONNX Runtime, Microsoft's free AI engine (12 MB from nuget.org, MIT license). It uses your graphics card "
+                     "when it can. Echo checks the file before keeping it.");
+        if (!ortError_.empty()) pop::TextColoredWrapped(p.bad, ortError_.c_str());
+        if (pop::SmallButton(ICON_DOWNLOAD " Install the AI engine")) {
+            ortError_.clear();
+            ortProgress_.cancel = false;
+            ortProgress_.done = 0;
+            ortInstall_ = std::async(std::launch::async, [this]() {
+                std::string err;
+                std::error_code e2;
+                const std::wstring dir = paths::appDataDir() + L"\\ai";
+                std::filesystem::create_directories(dir, e2);
+                win::installOnnxRuntime(dir, ortProgress_, &err);
+                return err;
+            });
+        }
+        pop::Hint("Or run tools\\fetch_onnxruntime.ps1 from Echo's folder.");
     }
     const bool downloading = contentVecDownload_.valid() &&
                              contentVecDownload_.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
@@ -607,8 +629,8 @@ void EchoApp::drawAiPanel(StripModel& strip) {
                 aiFx = dynamic_cast<ai::AiVoiceEffect*>(added.get());
             }
             if (aiFx) {
-                // A new AI voice runs on the graphics card when Echo can use one.
-                aiFx->setModel(m, fx ? aiFx->prefersGpu() : rt.hasGpu());
+                // A new AI voice runs on the graphics card when there is a real one.
+                aiFx->setModel(m, fx ? aiFx->prefersGpu() : rt.gpuRecommended());
                 toast("Loading '" + m.name + "'", 0);
             }
         }

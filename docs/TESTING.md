@@ -74,8 +74,8 @@ machine:
 
 `Echo.exe --ui-snapshots=<dir>` renders all pages and every setup-wizard step
 into PNG files using a throwaway profile, with real devices running. All 17
-snapshots (32 now: every screen incl. the Soundboard and mixed voices, the effects editor, Settings sections, all 7 setup
-steps, the virtual-mic step and the Devices page as without a cable (Install VB-CABLE), Home in the dark theme, the AI voice setup, and the Midnight, Rose, High contrast and custom themes) (including the Voices screen's noise & echo controls with live noise suppression and
+snapshots (33 now: every screen incl. the Soundboard and mixed voices, the effects editor, Settings sections, all 7 setup
+steps, the virtual-mic step and the Devices page as without a cable (Install VB-CABLE), Home in the dark theme, the AI voice setup with and without the AI engine, and the Midnight, Rose, High contrast and custom themes) (including the Voices screen's noise & echo controls with live noise suppression and
 echo cancellation on the real microphone) were reviewed; the app ran with live metering from the real
 microphone, 0 dropouts, ~1 % DSP load, and exited cleanly. Normal launch,
 first-run wizard, autosave, and clean shutdown were also checked by hand.
@@ -130,33 +130,48 @@ margin keep them from becoming dropouts.
 
 ## 7. Installer
 
-`Echo-0.1.0-setup-win64.exe` was run silently as a normal user
-(`/VERYSILENT /SUPPRESSMSGBOXES /CURRENTUSER /DIR=<scratch folder>`): exit
-code 0, no elevation prompt, files installed (no ONNX Runtime or drivers
-bundled), Start-menu shortcuts and the per-user uninstall entry created. The
-installed `Echo.exe` started and rendered all 17 snapshot pages with live
-audio, then exited cleanly. The silent uninstall (exit code 0) removed the
-program folder, shortcuts and uninstall entry, and kept the user's settings
-(the "also delete settings?" question defaults to No).
+2026-10-12, the current version: `Echo-0.1.0-setup-win64.exe` (8.6 MB) was run
+silently as a normal user (`/VERYSILENT /SUPPRESSMSGBOXES /CURRENTUSER
+/DIR=<scratch folder>`): exit code 0 after 2.9 s, no elevation prompt; Echo.exe,
+the 16 built-in sounds with their credits, 33 presets, the documentation and the
+ONNX Runtime script were installed, and no ONNX Runtime or drivers. The installed
+`Echo.exe` started and rendered all 33 snapshot pages (the AI voice panel offering
+Install the AI engine, as nothing AI is bundled), then exited cleanly. The silent
+uninstall (exit code 0) removed the program folder entirely. This run happened
+inside the Claude app, whose app isolation keeps Start-menu shortcuts and the
+uninstall entry out of the real user profile, so those two were checked only in
+the earlier run (2026-10-09: created on install, removed on uninstall, and the
+user's settings kept; the "also delete settings?" question defaults to No).
 
 ## Not tested (and why)
 
+* **Other PCs** — everything above ran on one laptop (Windows 11, Realtek
+  audio, a Blue Snowball USB microphone, an NVIDIA RTX 5070 Ti Laptop GPU with
+  Intel graphics). Not yet tried: Windows 10, USB and Bluetooth headsets,
+  other sound cards, AMD or Intel graphics for AI voices.
 * **Selecting the virtual microphone inside Discord/OBS** — not automated;
   the cable's recording side that those apps read was verified directly
-  (`echo_hwtest virtualmic`).
+  (`echo_hwtest virtualmic`). In real use (Roblox voice chat) other players
+  heard the voice effects, and Chrome routed into the mic arrived unchanged
+  (measured against Chrome's own audio: within 0.00 dB in every band).
+* **VB-CABLE's installer through Echo's Install VB-CABLE button** — the
+  download, checksum and unpacking were run; VB-Audio's installer itself was
+  not, because VB-CABLE was already installed on the test PC.
 * **Exclusive mode, low-latency shared mode** — implemented with automatic
   fallback; not exercised on this hardware.
 * **Physical unplug/replug, sleep/resume, changing the Windows default device
-  by hand** — logic tested with fake devices only.
+  by hand** — logic tested with fake devices only. (Windows shutting down
+  while Echo runs was checked for real: no "did not close normally" message
+  afterwards.)
 * **Thread sanitizer** — not available on Windows.
 * **Echo cancellation with real speakers** — verified with simulated room echo
   and through the engine with fake devices; not yet with a physical speaker/
   microphone pair (needs someone speaking while audio plays aloud).
-* **GPU (DirectML) inference** — no DirectML ONNX Runtime build installed.
-* **How RVC voices sound** — the numbers above are measured; nobody has listened
-  to Echo's RVC output yet. Real-time conversion differs from whole-file
-  conversion by 5.5 dB (log-mel) on a test recording, against 2.6 dB between two
-  whole-file conversions with different random noise.
+* **How RVC voices sound, formally** — the numbers above are measured, and the
+  developer used a real RVC voice in voice chat; there was no listening test
+  with several people. Real-time conversion differs from whole-file conversion
+  by 5.5–6.6 dB (log-mel, depending on Response) on a test recording, against
+  2.6 dB between two whole-file conversions with different random noise.
 * **Interactive UI flows** (clicking every control) — no UI automation
   framework; covered by reviewing snapshots and manual runs.
 * **Installer upgrade over a previous version, and installing for all users

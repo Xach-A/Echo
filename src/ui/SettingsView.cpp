@@ -473,9 +473,9 @@ void EchoApp::drawSettings() {
         ImGui::Dummy(ImVec2(0, 2.0f * sc));
         ImGui::BulletText("No accounts, subscriptions, ads or telemetry.");
         ImGui::BulletText("Audio is processed only on this computer, and nothing is uploaded.");
-        ImGui::BulletText("Echo goes online only when you click Download ContentVec (AI voices) or Install VB-CABLE.");
+        ImGui::BulletText("Echo goes online only when you click Install VB-CABLE, Install the AI engine or Download ContentVec.");
         ImGui::BulletText("Nothing is recorded unless you press Record.");
-        ImGui::BulletText("AI voices use ONNX Runtime only if you install it, with voices you add yourself.");
+        ImGui::BulletText("AI voices use Microsoft's ONNX Runtime only if you install it, with voices you add yourself.");
         ImGui::BulletText("Logs are plain text files in your app data folder, for fixing problems.");
         pop::EndCard();
         break;

@@ -13,14 +13,15 @@ them.
 
 The first time, Echo also needs two things (the panel shows what's missing):
 
-* **ONNX Runtime** (Microsoft's free AI engine, MIT): run
-  `tools\fetch_onnxruntime.ps1` from Echo's folder (it asks first, downloads
-  about 83 MB from github.com/microsoft/onnxruntime and checks its SHA-256),
-  or copy `onnxruntime.dll` and `onnxruntime_providers_shared.dll` into the
-  `ai` folder next to Echo.exe. With a graphics card, run it with **-Gpu**
-  instead: it gets the DirectML build (12 MB from nuget.org, SHA-512 checked),
-  which converts on the graphics card and uses the DirectML that comes with
-  Windows.
+* **The AI engine**, ONNX Runtime (Microsoft's, free, MIT): click **Install
+  the AI engine**. Echo downloads ONNX Runtime 1.24.4 with DirectML (12 MB
+  from nuget.org) only then, keeps it only if its size and SHA-256 match, and
+  puts its DLLs and license files in `%APPDATA%\Echo\ai`. It converts on the
+  graphics card when it can (with the DirectML that comes with Windows) and on
+  the CPU otherwise. Alternatives: `tools\fetch_onnxruntime.ps1` (the CPU
+  build 1.30 from GitHub, or `-Gpu` for the same DirectML build), or copy
+  `onnxruntime.dll` and `onnxruntime_providers_shared.dll` into the `ai`
+  folder next to Echo.exe (that one is used first).
 * **ContentVec**, the speech model every RVC voice uses (361 MB, MIT): click
   **Download ContentVec**. Echo downloads it only then, from the Applio
   project's copy on Hugging Face, checks its size and SHA-256
@@ -37,7 +38,7 @@ someone. RVC files carry no license information; Echo shows that.
 | Voice match | Voices with an .index: how strongly the index pulls your speech towards the voice's own sound (0–100 %, default 50 %). |
 | Mix | Your plain voice vs the AI voice. |
 | Response | RVC voices: Quicker, Balanced (default) or Smoother. Quicker is heard sooner but can sound rougher; Smoother sounds cleaner but later. Changing it reloads the voice (a second or two of your plain voice). |
-| Use the graphics card | Shown with the DirectML build of ONNX Runtime; on by default there. Echo picks the card Windows ranks fastest (on a laptop, the NVIDIA/AMD card rather than the built-in Intel one) and shows its name. Switching reloads the voice. |
+| Use the graphics card | Shown with the DirectML build of ONNX Runtime; on by default when the fastest card has its own memory (1 GB or more), since built-in graphics can be slower than the CPU. Echo picks the card Windows ranks fastest (on a laptop, the NVIDIA/AMD card rather than the built-in Intel one) and shows its name. Switching reloads the voice. |
 
 ## What works
 

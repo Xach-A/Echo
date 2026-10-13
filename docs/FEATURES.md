@@ -144,7 +144,8 @@ gate/EQ/compression → voice transformation. Effects can be reordered freely.
 | Async inference pipeline, fixed latency, dry fallback, chunk crossfade; the delay set from the voice's measured speed | Tested with real ONNX Runtime 1.30.0 (the converted voice lands exactly at the reported delay; it was 2 crossfade lengths late before) |
 | Echo model packages (model.json + ONNX) with license/consent metadata, validation | Tested |
 | RVC v1 voices | Implemented as the original RVC does it, not tried on a real v1 voice |
-| GPU (DirectML): `fetch_onnxruntime.ps1 -Gpu`; the fastest card is picked; on by default when available | Tested + HW-verified on an RTX 5070 Ti Laptop GPU: same output as the CPU (graphs within 4e-7, real voice 0.01 dB); delay 0.24 / 0.29 / 0.43 s (Quicker / Balanced / Smoother), 0 fallbacks |
+| AI engine installed on click (ONNX Runtime 1.24.4 DirectML build, 12 MB from nuget.org, size and SHA-256 pinned) | HW-verified (`echo_hwtest ort-install`: downloaded, checked and unpacked in 0.9 s; loaded from its folder and ran on the graphics card) |
+| GPU (DirectML); the fastest card is picked; on by default when that card has its own memory | Tested + HW-verified on an RTX 5070 Ti Laptop GPU: same output as the CPU (graphs within 4e-7, real voice 0.01 dB); delay 0.24 / 0.29 / 0.43 s (Quicker / Balanced / Smoother), 0 fallbacks |
 | Pitch for RVC | Echo's YIN tracker (RVC's neural pitch models are not included) |
 
 ## Recording and monitoring

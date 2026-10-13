@@ -28,6 +28,7 @@
 //                                 recording side: level, shape, latency, glitches (memory only)
 //   echo_hwtest hotkeys           push to talk / mute keys through Windows' real key state:
 //                                 presses F24, F23 and F22 (instant taps) with SendInput (keys no app uses)
+//   echo_hwtest ort-install <folder>  install ONNX Runtime (DirectML build) there, as the AI setup button does
 //   echo_hwtest vbcable-download <folder>  download, check and unpack VB-Audio's VB-CABLE pack as the
 //                                 app's Install button does (doesn't open the installer)
 //   echo_hwtest all               run everything above (playback is audible, -40 dBFS)
@@ -59,6 +60,7 @@
 #include "audio/AppRouting.h"
 #include "audio/Download.h"
 #include "audio/HotkeyService.h"
+#include "audio/OrtInstall.h"
 #include "audio/VbCable.h"
 #include "audio/AppSessions.h"
 #include "audio/AudioDecoder.h"
@@ -1319,6 +1321,25 @@ int contentVecDownload(const std::wstring& dest) {
     return ok ? 0 : 1;
 }
 
+// Installs ONNX Runtime into a folder as Echo's AI setup button does and
+// lists what it put there.
+int ortInstall(const std::wstring& dir) {
+    win::DownloadProgress prog;
+    std::string err;
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    const double t0 = monotonicSeconds();
+    if (!win::installOnnxRuntime(dir, prog, &err)) {
+        std::printf("failed: %s\n", err.c_str());
+        return 1;
+    }
+    std::printf("installed in %.1f s\n", monotonicSeconds() - t0);
+    for (const auto& e : std::filesystem::directory_iterator(dir, ec))
+        std::printf("  %s (%llu bytes)\n", wideToUtf8(e.path().filename().wstring()).c_str(),
+                    static_cast<unsigned long long>(e.is_regular_file() ? e.file_size() : 0));
+    return 0;
+}
+
 // Downloads, checks and unpacks VB-Audio's VB-CABLE pack as the app does,
 // without opening the installer.
 int vbCableDownload(const std::wstring& folder) {
@@ -2070,6 +2091,7 @@ int wmain(int argc, wchar_t** argv) {
     if (argc > 2 && std::wstring(argv[1]) == L"faiss-info") return faissInfo(argv[2]);
     if (argc > 2 && std::wstring(argv[1]) == L"contentvec-download") return contentVecDownload(argv[2]);
     if (argc > 2 && std::wstring(argv[1]) == L"vbcable-download") return vbCableDownload(argv[2]);
+    if (argc > 2 && std::wstring(argv[1]) == L"ort-install") return ortInstall(argv[2]);
     if (argc > 1 && std::wstring(argv[1]) == L"dml-probe") return dmlProbe();
     if (argc > 4 && std::wstring(argv[1]) == L"rvc-offline")
         return rvcOffline(argv[2], argv[3], argv[4], argc > 5 ? static_cast<float>(_wtof(argv[5])) : 0.0f,

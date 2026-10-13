@@ -34,9 +34,11 @@ New-Item -ItemType Directory -Force (Join-Path $stage 'tools') | Out-Null
 Copy-Item (Join-Path $root 'tools\fetch_onnxruntime.ps1') (Join-Path $stage 'tools')
 New-Item -ItemType Directory -Force (Join-Path $stage 'ai') | Out-Null
 Set-Content -Path (Join-Path $stage 'ai\README.txt') -Encoding utf8 -Value @'
-Optional: place onnxruntime.dll (and onnxruntime_providers_shared.dll) from the
-official Microsoft ONNX Runtime release here to enable AI voice conversion.
-Run ..\tools\fetch_onnxruntime.ps1 to download and verify it. See ..\docs\AI_VOICE.md.
+AI voices need Microsoft's ONNX Runtime. The easy way: Voices > AI voice >
+Install the AI engine (Echo downloads and checks it and keeps it in
+%APPDATA%\Echo\ai). Or run ..\tools\fetch_onnxruntime.ps1, or place
+onnxruntime.dll and onnxruntime_providers_shared.dll from an official release
+here (used first). See ..\docs\AI_VOICE.md.
 '@
 
 # Portable ZIP (settings still go to %APPDATA%\Echo).
