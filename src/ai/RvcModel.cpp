@@ -115,9 +115,12 @@ bool RvcModel::param(const std::string& name, W& out) const {
     return true;
 }
 
-bool RvcModel::buildGenerator(int frames, int speaker, std::vector<uint8_t>& out, std::string* error) const {
+bool RvcModel::buildGenerator(int frames, int speaker, std::vector<uint8_t>& out, std::string* error, int decodeFrames) const {
     const RvcInfo& I = info_;
     const int64_t T = frames, upp = I.hop, C = I.hidden, H = I.heads, dk = C / H, inter = I.inter;
+    // Frames the flow runs on (Tf) and the vocoder makes (D): the newest.
+    const int64_t D = decodeFrames > 0 && decodeFrames < frames ? decodeFrames : T;
+    const int64_t Tf = flowFrames(frames, static_cast<int>(D));
     std::string missing;
     OnnxGraph g;
     auto need = [&](const std::string& name) {
@@ -180,8 +183,12 @@ bool RvcModel::buildGenerator(int frames, int speaker, std::vector<uint8_t>& out
     const std::string phone = g.input("phone", OnnxType::Float, {1, T, I.embDim});
     const std::string pitch = g.input("pitch", OnnxType::Int64, {1, T});
     const std::string pitchf = g.input("pitchf", OnnxType::Float, {1, T});
-    const std::string rnd = g.input("rnd", OnnxType::Float, {1, inter, T});
-    const std::string noise = g.input("noise", OnnxType::Float, {1, T * upp});
+    const std::string rnd = g.input("rnd", OnnxType::Float, {1, inter, Tf});
+    const std::string noise = g.input("noise", OnnxType::Float, {1, D * upp});
+    // The newest `keep` of `len` along `axis`.
+    auto newest = [&](const std::string& x, int64_t len, int64_t keep, int64_t axis) {
+        return keep >= len ? x : g.op("Slice", {x, g.ints({len - keep}), g.ints({len}), g.ints({axis})});
+    };
 
     // ------------------------------------------------------ text encoder
     {
@@ -247,7 +254,8 @@ bool RvcModel::buildGenerator(int frames, int speaker, std::vector<uint8_t>& out
             h = conv(h, f + ".conv_2", pad);
             x = layerNorm(g.op("Add", {x, h}), "enc_p.encoder.norm_layers_2." + std::to_string(l));
         }
-        const std::string stats = conv(x, "enc_p.proj", 0); // [1, 2*inter, T]
+        x = newest(x, T, Tf, 2);
+        const std::string stats = conv(x, "enc_p.proj", 0); // [1, 2*inter, Tf]
         const auto ml = split2(stats, inter, inter, 1);
         // z_p = m + exp(logs) * noise * 0.66666
         std::string z = g.op("Add", {ml[0], g.op("Mul", {g.op("Mul", {g.op("Exp", {ml[1]}), rnd}), g.scalar(0.66666f)})});
@@ -280,10 +288,12 @@ bool RvcModel::buildGenerator(int frames, int speaker, std::vector<uint8_t>& out
             const std::string m = conv(skip, p + ".post", 0);
             z = g.op("Concat", {parts[0], g.op("Sub", {parts[1], m})}, {attrInt("axis", 1)});
         }
+        z = newest(z, Tf, D, 2);
 
         // ---------------------------------------------------------- vocoder
-        // Source: a sine at the pitch (phase kept continuous across frames)
-        // plus noise; noise only where unvoiced.
+        // Source: a sine at the pitch (phase kept continuous across frames,
+        // from the start of the block, so the newest frames get the phase they
+        // would have had in a full run) plus noise; noise only where unvoiced.
         std::vector<float> grid(static_cast<size_t>(upp));
         for (int64_t k = 0; k < upp; ++k) grid[static_cast<size_t>(k)] = static_cast<float>(k + 1);
         const std::string f0 = g.op("Unsqueeze", {pitchf, g.ints({2})}); // [1,T,1]
@@ -293,18 +303,18 @@ bool RvcModel::buildGenerator(int frames, int speaker, std::vector<uint8_t>& out
             g.op("Sub", {g.op("Mod", {g.op("Add", {lastCol, g.scalar(0.5f)}), g.scalar(1.0f)}, {attrInt("fmod", 1)}), g.scalar(0.5f)});
         const std::string cum = g.op("Mod", {g.op("CumSum", {rem, g.constantInt64({}, {1})}), g.scalar(1.0f)}, {attrInt("fmod", 1)});
         ph = g.op("Add", {ph, g.op("Pad", {cum, g.ints({0, 1, 0, 0, 0, 0})})});
-        ph = reshape(ph, {1, T * upp});
+        ph = reshape(newest(ph, T, D, 1), {1, D * upp}); // the newest frames
         const std::string sine =
             g.op("Mul", {g.op("Sin", {g.op("Mul", {ph, g.scalar(2.0f * static_cast<float>(3.14159265358979323846))})}), g.scalar(0.1f)});
-        std::string uv = g.op("Cast", {g.op("Greater", {f0, g.scalar(0.0f)})}, {attrInt("to", 1)}); // [1,T,1]
-        uv = reshape(g.op("Expand", {uv, g.ints({1, T, upp})}), {1, T * upp});
+        std::string uv = g.op("Cast", {g.op("Greater", {newest(f0, T, D, 1), g.scalar(0.0f)})}, {attrInt("to", 1)}); // [1,D,1]
+        uv = reshape(g.op("Expand", {uv, g.ints({1, D, upp})}), {1, D * upp});
         const std::string amp =
             g.op("Add", {g.op("Mul", {uv, g.scalar(0.003f)}), g.op("Mul", {g.op("Sub", {g.scalar(1.0f), uv}), g.scalar(0.1f / 3.0f)})});
         const std::string src = g.op("Add", {g.op("Mul", {sine, uv}), g.op("Mul", {amp, noise})});
         const W lw = need("dec.m_source.l_linear.weight"), lb = need("dec.m_source.l_linear.bias");
         std::string har = g.op("Tanh", {g.op("Add", {g.op("Mul", {src, g.scalar(lw.v.empty() ? 0.0f : lw.v[0])}),
                                                       g.scalar(lb.v.empty() ? 0.0f : lb.v[0])})});
-        har = reshape(har, {1, 1, T * upp});
+        har = reshape(har, {1, 1, D * upp});
 
         const std::vector<float> condG = applyConv1x1("dec.cond", spk);
         std::string y = conv(z, "dec.conv_pre", 3, 1, 1, true, &condG);
@@ -350,7 +360,7 @@ bool RvcModel::buildGenerator(int frames, int speaker, std::vector<uint8_t>& out
         }
         y = lrelu(y, 0.01f); // torch's default slope here
         y = g.op("Tanh", {conv(y, "dec.conv_post", 3, 1, 1, false)});
-        g.output(reshape(y, {1, T * upp}), "audio", OnnxType::Float, {1, T * upp});
+        g.output(reshape(y, {1, D * upp}), "audio", OnnxType::Float, {1, D * upp});
     }
     if (!missing.empty()) {
         if (error) *error = "The model is missing '" + missing + "'";

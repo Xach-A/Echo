@@ -165,4 +165,4 @@ See `AI_VOICE.md`.
 | `doubler` | detune, delay, width, level, dry |
 | `octaver` | sub, up, dry |
 | `autotune` | key, scale, style, strength, speed, smoothing, reference, preserve, vib_rate, vib_depth, range, mix |
-| `ai_voice` | pitch, mix, latency, index (Voice match), response (0 Quicker, 1 Balanced, 2 Smoother); the model itself is selected in the UI |
+| `ai_voice` | pitch, mix, latency, index (Voice match), response (Quality: 0 Fastest, 1 Fast, 2 Balanced, 3 Smooth, 4 Smoothest; saved as "response", its name in Echo 0.1, where 0-2 meant Quicker, Balanced, Smoother); the model itself is selected in the UI |

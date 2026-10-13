@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -118,6 +119,73 @@ TEST_CASE("rvc: the voice network matches the official implementation") {
     CHECK(out[0].size() == expected.size());
     CHECK(rmsRef > 1e-3);
     CHECK(err1 < 1e-4);
+}
+
+TEST_CASE("rvc: making only the newest frames gives the same audio there as the whole block") {
+    if (!ortAvailable()) return;
+    ai::RvcModel model;
+    std::string err;
+    REQUIRE_MESSAGE(model.load(rvcData("tiny-voice/tiny.pth"), &err), err);
+    const int T = 90, D = 30, hop = model.info().hop, inter = model.info().inter, dim = model.info().embDim;
+    const int Tf = ai::RvcModel::flowFrames(T, D);
+    CHECK(Tf == D + ai::RvcModel::kFlowReach);
+    CHECK(ai::RvcModel::flowFrames(T, 0) == T);
+    CHECK(ai::RvcModel::flowFrames(T, T - 10) == T);
+    // A voice-like input: features that drift, a gliding pitch with a gap.
+    std::mt19937 rng(7);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    std::vector<float> phone(static_cast<size_t>(T) * dim), pitchf(T), rnd(static_cast<size_t>(inter) * T), noise(static_cast<size_t>(T) * hop);
+    std::vector<int64_t> pitch(T);
+    for (int t = 0; t < T; ++t) {
+        for (int d = 0; d < dim; ++d) phone[static_cast<size_t>(t) * dim + d] = std::sin(0.07f * t * (d % 7 + 1) + d) + 0.3f * nd(rng);
+        pitchf[t] = (t >= 40 && t < 46) ? 0.0f : 140.0f + 60.0f * std::sin(0.05f * t);
+        pitch[t] = ai::rvcCoarsePitch(pitchf[t]);
+    }
+    for (float& v : rnd) v = nd(rng);
+    for (float& v : noise) v = nd(rng);
+    auto run = [&](int decode) {
+        std::vector<uint8_t> onnx;
+        REQUIRE_MESSAGE(model.buildGenerator(T, 0, onnx, &err, decode), err);
+        ai::OrtGraphSession s;
+        REQUIRE_MESSAGE(s.create(onnx, false, 2, &err), err);
+        const int d = decode > 0 ? decode : T, tf = ai::RvcModel::flowFrames(T, d);
+        // The newest frames of the latent noise and the newest samples of the source noise.
+        std::vector<float> r(static_cast<size_t>(inter) * tf);
+        for (int c = 0; c < inter; ++c)
+            std::copy_n(&rnd[static_cast<size_t>(c) * T + (T - tf)], tf, &r[static_cast<size_t>(c) * tf]);
+        const std::vector<float> nz(noise.end() - static_cast<long>(d) * hop, noise.end());
+        std::vector<std::vector<float>> out;
+        REQUIRE_MESSAGE(s.run({{"phone", ai::OnnxType::Float, {1, T, dim}, phone.data()},
+                               {"pitch", ai::OnnxType::Int64, {1, T}, pitch.data()},
+                               {"pitchf", ai::OnnxType::Float, {1, T}, pitchf.data()},
+                               {"rnd", ai::OnnxType::Float, {1, inter, tf}, r.data()},
+                               {"noise", ai::OnnxType::Float, {1, static_cast<int64_t>(nz.size())}, nz.data()}},
+                              {"audio"}, out, &err),
+                        err);
+        return out[0];
+    };
+    const std::vector<float> whole = run(0), part = run(D);
+    REQUIRE(whole.size() == static_cast<size_t>(T) * hop);
+    REQUIRE(part.size() == static_cast<size_t>(D) * hop);
+    // Frame by frame from the newest: equal except where the vocoder starts
+    // (its first frames see silence before them instead of the voice).
+    double rmsAll = 0.0;
+    for (float v : whole) rmsAll += v * v;
+    rmsAll = std::sqrt(rmsAll / whole.size());
+    int firstEqual = D;
+    for (int f = D - 1; f >= 0; --f) {
+        double e = 0.0;
+        for (int k = 0; k < hop; ++k) {
+            const size_t i = static_cast<size_t>(f) * hop + k;
+            e = std::max(e, static_cast<double>(std::fabs(part[i] - whole[whole.size() - part.size() + i])));
+        }
+        if (e > 1e-3 * rmsAll) break;
+        firstEqual = f;
+    }
+    MESSAGE("newest " << D << " frames made alone: equal to the whole block from frame " << firstEqual << " on (signal rms " << rmsAll
+                      << ")");
+    CHECK(rmsAll > 1e-3);
+    CHECK(firstEqual <= 6); // the vocoder's reach back: Echo makes 60 ms more than it plays
 }
 
 TEST_CASE("rvc: ContentVec matches the official implementation") {
@@ -238,6 +306,10 @@ TEST_CASE("rvc: index retrieval finds the voice's nearest features like RVC does
         const std::vector<float> e(expected.begin() + k * 128, expected.begin() + (k + 1) * 128);
         CHECK(maxAbsDiff(out, e) < 1e-4);
     }
+    // Both queries at once: the same.
+    std::vector<float> both(2 * 128);
+    idx.retrieveMany(q.data(), 2, 8, both.data());
+    CHECK(maxAbsDiff(both, std::vector<float>(expected.begin(), expected.begin() + 2 * 128)) < 1e-4);
     // Not an index: refused with a message.
     ai::FaissIndex bad;
     CHECK_FALSE(bad.load(rvcData("cv_audio.bin"), &err));
@@ -364,6 +436,53 @@ TEST_CASE("rvc: the real-time pipeline converts blocks of voice") {
     for (size_t i = 0; i < x16.size(); ++i) x16[i] = 0.3f * static_cast<float>(std::sin(2.0 * 3.14159265358979 * 150.0 * i / 16000.0));
     ai::RvcVoice::trackPitch(x16, 50, f0);
     CHECK(f0[30] == doctest::Approx(150.0).epsilon(0.02));
+    // Tracking only the end (the frames before kept) gives the same pitch.
+    std::vector<float> glide(16000), all, end;
+    double ph = 0.0;
+    for (size_t i = 0; i < glide.size(); ++i) {
+        ph += 2.0 * 3.14159265358979 * (120.0 + 120.0 * i / 16000.0) / 16000.0;
+        glide[i] = 0.3f * static_cast<float>(std::sin(ph) + 0.4 * std::sin(2.0 * ph));
+    }
+    ai::RvcVoice::trackPitch(glide, 100, all);
+    end = all;
+    std::fill(end.begin() + 80, end.end(), -1.0f);
+    ai::RvcVoice::trackPitch(glide, 100, end, 80);
+    CHECK(maxAbsDiff(end, all) < 0.5);
+    CHECK(all[90] > all[20]); // it glides up
+}
+
+TEST_CASE("rvc: a block that moves on from the last converts the same as one converted afresh") {
+    if (!ortAvailable()) return;
+    ai::ModelManifest m;
+    REQUIRE(ai::loadManifest(rvcData("tiny-voice"), m));
+    const int block = 32000 * 800 / 1000, step = 32000 * 150 / 1000; // 800 ms blocks, moved on by 150 ms
+    std::vector<float> speech(static_cast<size_t>(block + step));
+    double ph = 0.0;
+    for (size_t i = 0; i < speech.size(); ++i) {
+        ph += 2.0 * 3.14159265358979 * (130.0 + 40.0 * std::sin(i / 6000.0)) / 32000.0;
+        speech[i] = 0.2f * static_cast<float>(std::sin(ph) + 0.5 * std::sin(2.0 * ph) + 0.25 * std::sin(3.0 * ph));
+    }
+    // Silent where the second block starts: a fresh block can't tell the
+    // pitch of its first frames (too little audio before them), the kept one
+    // can, which would make them differ there.
+    std::fill(speech.begin(), speech.begin() + step + 3200, 0.0f);
+    ai::RvcVoice a, b;
+    std::string err;
+    REQUIRE_MESSAGE(a.load(m, false, block, &err, rvcData("contentvec-tiny.bin"), 32000 * 300 / 1000), err);
+    REQUIRE_MESSAGE(b.load(m, false, block, &err, rvcData("contentvec-tiny.bin"), 32000 * 300 / 1000), err);
+    CHECK(a.decodedSamples() == 32000 * 300 / 1000);
+    a.seed(5);
+    b.seed(5);
+    std::vector<float> outA, outB;
+    REQUIRE(a.run(speech.data(), block, 0.0f, outA, &err));
+    REQUIRE(b.run(speech.data(), block, 0.0f, outB, &err));
+    a.setAdvance(step); // a keeps the pitch it has; b tracks it all again
+    REQUIRE(a.run(speech.data() + step, block, 0.0f, outA, &err));
+    REQUIRE(b.run(speech.data() + step, block, 0.0f, outB, &err));
+    CHECK(rms(outA, 0, outA.size()) > 1e-4f);
+    CHECK(maxAbsDiff(outA, outB) < 1e-4);
+    // Only the newest 300 ms are made; the context before stays silent.
+    CHECK(rms(outA, 0, static_cast<size_t>(block - 32000 * 300 / 1000)) == 0.0f);
 }
 
 TEST_CASE("rvc: ContentVec is found where Echo keeps it, and checked by its SHA-256") {

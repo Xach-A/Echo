@@ -23,6 +23,26 @@ namespace echo::ai {
 
 enum class AiStatus : int { NoModel = 0, Loading = 1, Running = 2, Error = 3 };
 
+// How a voice is converted in pieces (milliseconds). Each run converts the
+// newest `chunk` with up to `context` of audio before it, and `lookahead` of
+// it is left after the part that is played, so that part isn't made at the
+// very edge. Pieces are lined up (SOLA) and blended over `crossfade`.
+// Delay: chunk + lookahead + crossfade + a margin for converting it.
+struct StreamPlan {
+    int chunkMs = 150;
+    int contextMs = 2000;
+    int crossfadeMs = 40;
+    int lookaheadMs = 0;
+};
+// The plan for each Quality step of an RVC voice (0 fastest .. 4 smoothest).
+StreamPlan rvcStreamPlan(int quality);
+
+// Where a new piece lines up best with the end of the last one (SOLA): the
+// shift (0..search) at which `wav` correlates best with `tail` (wav holds
+// tail.size() + search samples or more). Shifts about as good as the middle
+// one lose to it, so a steady tone keeps its timing; silence: the middle.
+int solaOffset(const std::vector<float>& wav, const std::vector<float>& tail, int search);
+
 class AiVoiceEffect final : public Effect {
 public:
     AiVoiceEffect();
@@ -58,8 +78,19 @@ public:
     // Input the worker dropped because it had fallen too far behind to be
     // useful (inference slower than real time): it skips to the newest audio.
     std::atomic<uint64_t> skippedSamples{0};
+    // The context the loaded RVC voice really hears (ms; shorter than its
+    // plan's when the PC can't convert that much in time).
+    std::atomic<int> contextMs{0};
+    std::atomic<int> loadedQuality{-1}; // the Quality step the RVC voice was loaded with
     // Tests only: extra time added to every inference call.
     void setArtificialDelayForTesting(int ms) { testDelayMs_.store(ms); }
+    // Tests and measurements only: RVC voices load with this plan instead of
+    // their Quality step's (context used as given).
+    void setStreamPlanForTesting(const StreamPlan& p) {
+        std::lock_guard<std::mutex> lock(modelMutex_);
+        testPlan_ = p;
+        haveTestPlan_ = true;
+    }
 
 protected:
     void onPrepare() override;
@@ -104,6 +135,8 @@ private:
     std::atomic<int> minLatency_{0};  // chunk + margin (engine samples)
     std::atomic<int> latencyPub_{0};  // latency_ published for the worker
     std::atomic<int> testDelayMs_{0};
+    StreamPlan testPlan_;
+    bool haveTestPlan_ = false;
     bool lastActive_ = false;         // audio thread only
     int maxDryDelay_ = 0;
 };

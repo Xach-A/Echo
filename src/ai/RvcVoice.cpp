@@ -1,6 +1,7 @@
 #include "ai/RvcVoice.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <thread>
@@ -150,7 +151,8 @@ bool loadRvcManifest(const std::wstring& dir, ModelManifest& m) {
     return m.valid;
 }
 
-bool RvcVoice::load(const ModelManifest& m, bool preferGpu, int samples, std::string* error, const std::wstring& encoder) {
+bool RvcVoice::load(const ModelManifest& m, bool preferGpu, int samples, std::string* error, const std::wstring& encoder,
+                    int decodeSamples) {
     const std::wstring cvPath = encoder.empty() ? contentVecPath() : encoder;
     RvcModel model;
     if (!model.load(m.pthPath, error)) return false;
@@ -159,6 +161,8 @@ bool RvcVoice::load(const ModelManifest& m, bool preferGpu, int samples, std::st
     // Whole 10 ms frames.
     frames_ = std::max(4, (samples + hop - 1) / hop);
     samples_ = frames_ * hop;
+    decFrames_ = decodeSamples > 0 ? std::min(frames_, (decodeSamples + hop - 1) / hop) : frames_;
+    flowFrames_ = RvcModel::flowFrames(frames_, decFrames_);
     n16_ = frames_ * 160;
     pad16_ = 480;
     featFrames_ = ContentVecModel::framesFor(n16_ + pad16_);
@@ -184,7 +188,9 @@ bool RvcVoice::load(const ModelManifest& m, bool preferGpu, int samples, std::st
     if (!encoder_.create(graph, preferGpu, threads, error)) return false;
     graph.clear();
     graph.shrink_to_fit();
-    if (!model.buildGenerator(frames_, 0, graph, error) || !voice_.create(graph, preferGpu, threads, error)) return false;
+    if (!model.buildGenerator(frames_, 0, graph, error, decFrames_ < frames_ ? decFrames_ : 0) ||
+        !voice_.create(graph, preferGpu, threads, error))
+        return false;
     provider_ = voice_.provider();
     if (!m.indexPath.empty()) {
         std::string e;
@@ -197,31 +203,40 @@ bool RvcVoice::load(const ModelManifest& m, bool preferGpu, int samples, std::st
     phone_.assign(static_cast<size_t>(frames_) * info_.embDim, 0.0f);
     pitch_.assign(static_cast<size_t>(frames_), 1);
     pitchf_.assign(static_cast<size_t>(frames_), 0.0f);
-    rnd_.assign(static_cast<size_t>(info_.inter) * frames_, 0.0f);
-    noise_.assign(static_cast<size_t>(samples_), 0.0f);
-    ECHO_LOG_INFO("RVC voice '%s' ready: %s %d Hz, %d frames per block, %s, index %s", m.name.c_str(), info_.version.c_str(),
-                  info_.sampleRate, frames_, provider_.c_str(), index_.loaded() ? "yes" : "no");
+    rnd_.assign(static_cast<size_t>(info_.inter) * flowFrames_, 0.0f);
+    noise_.assign(static_cast<size_t>(decFrames_) * hop, 0.0f);
+    ECHO_LOG_INFO("RVC voice '%s' ready: %s %d Hz, %d frames per block (%d made), %s, index %s", m.name.c_str(),
+                  info_.version.c_str(), info_.sampleRate, frames_, decFrames_, provider_.c_str(), index_.loaded() ? "yes" : "no");
     return true;
 }
 
-void RvcVoice::trackPitch(const std::vector<float>& x16, int frames, std::vector<float>& f0) {
+void RvcVoice::trackPitch(const std::vector<float>& x16, int frames, std::vector<float>& f0, int firstFrame) {
     PitchDetector det;
     det.prepare(16000.0, 50.0, 1100.0);
     det.setThresholds(0.15f, -50.0f);
     const int half = det.windowSamples() / 2;
-    f0.assign(static_cast<size_t>(frames), 0.0f);
-    size_t pos = 0;
-    for (int i = 0; i < frames; ++i) {
+    firstFrame = std::clamp(firstFrame, 0, frames);
+    f0.resize(static_cast<size_t>(frames), 0.0f);
+    // From three windows before the first frame: the detector's filter settles.
+    size_t pos = static_cast<size_t>(std::max(0, firstFrame * 160 + half - 3 * det.windowSamples()));
+    const size_t start = pos;
+    for (int i = firstFrame; i < frames; ++i) {
         // Analyze when the window is centred on this frame.
         const size_t end = std::min(x16.size(), static_cast<size_t>(i * 160 + half));
         while (pos < end) det.push(x16[pos++]);
-        if (static_cast<int>(pos) < det.windowSamples()) continue; // not enough audio yet
-        const PitchDetector::Result r = det.analyze();
-        f0[static_cast<size_t>(i)] = r.voiced ? r.hz : 0.0f;
+        float hz = 0.0f;
+        if (static_cast<int>(pos - start) >= det.windowSamples()) { // enough audio
+            const PitchDetector::Result r = det.analyze();
+            if (r.voiced) hz = r.hz;
+        }
+        f0[static_cast<size_t>(i)] = hz;
     }
 }
 
 bool RvcVoice::run(const float* in, int n, float pitchSemis, std::vector<float>& out, std::string* error) {
+    using clock = std::chrono::steady_clock;
+    auto since = [](clock::time_point t) { return std::chrono::duration<double>(clock::now() - t).count(); };
+    auto t = clock::now();
     // The block at the network's size: newest audio at the end.
     std::vector<float> block(static_cast<size_t>(samples_), 0.0f);
     const int take = std::min(n, samples_);
@@ -230,32 +245,53 @@ bool RvcVoice::run(const float* in, int n, float pitchSemis, std::vector<float>&
     std::vector<float> x16 = info_.sampleRate == 16000 ? block : resampleOffline(block, 1, info_.sampleRate, 16000.0);
     x16.resize(static_cast<size_t>(n16_), 0.0f);
     for (int k = 0; k < pad16_; ++k) x16.push_back(x16[static_cast<size_t>(std::max(0, n16_ - 2 - k))]);
+    times_.prep = since(t);
+    t = clock::now();
     std::vector<std::vector<float>> res;
     const std::vector<OrtGraphSession::Input> encIn = {
         {"audio", OnnxType::Float, {1, n16_ + pad16_}, x16.data()}};
     if (!encoder_.run(encIn, {"features"}, res, error)) return false;
     feats_ = std::move(res[0]);
+    times_.encoder = since(t);
+    t = clock::now();
     const int D = info_.embDim;
     if (index_.loaded() && indexRate_ > 0.001f) {
-        std::vector<float> near(static_cast<size_t>(D));
-        for (int f = 0; f < featFrames_; ++f) {
-            float* q = &feats_[static_cast<size_t>(f) * D];
-            index_.retrieve(q, 8, near.data());
-            for (int d = 0; d < D; ++d) q[d] = indexRate_ * near[static_cast<size_t>(d)] + (1.0f - indexRate_) * q[d];
-        }
+        // Only where the flow runs (as RVC's real-time mode): the context
+        // before it only informs the text encoder.
+        const int from = std::min((frames_ - flowFrames_) / 2, featFrames_), count = featFrames_ - from;
+        float* q = &feats_[static_cast<size_t>(from) * D];
+        std::vector<float> near(static_cast<size_t>(count) * D);
+        index_.retrieveMany(q, count, 8, near.data());
+        for (size_t i = 0; i < near.size(); ++i) q[i] = indexRate_ * near[i] + (1.0f - indexRate_) * q[i];
     }
+    times_.index = since(t);
+    t = clock::now();
     // Features to 100 a second (each twice), pitch per 10 ms.
     for (int i = 0; i < frames_; ++i) {
         const int f = std::min(i / 2, featFrames_ - 1);
         std::copy_n(&feats_[static_cast<size_t>(f) * D], D, &phone_[static_cast<size_t>(i) * D]);
     }
-    trackPitch(x16, frames_, f0_);
+    // The pitch: when this block is the last one moved on, its frames up to
+    // the new audio are the last block's (moved along); only the end is new.
+    int firstFrame = 0;
+    if (advance_ > 0 && havePitch_) {
+        const int shift = (advance_ + info_.hop / 2) / info_.hop;
+        if (shift < frames_) {
+            std::move(f0_.begin() + shift, f0_.end(), f0_.begin());
+            firstFrame = std::max(0, frames_ - shift - kPitchReach);
+        }
+    }
+    advance_ = 0;
+    trackPitch(x16, frames_, f0_, firstFrame);
+    havePitch_ = true;
     const float shift = std::pow(2.0f, pitchSemis / 12.0f);
     for (int i = 0; i < frames_; ++i) {
         const float hz = f0_[static_cast<size_t>(i)] * shift;
         pitchf_[static_cast<size_t>(i)] = hz;
         pitch_[static_cast<size_t>(i)] = rvcCoarsePitch(hz);
     }
+    times_.pitch = since(t);
+    t = clock::now();
     std::normal_distribution<float> nd(0.0f, 1.0f);
     for (float& v : rnd_) v = nd(rng_);
     for (float& v : noise_) v = nd(rng_);
@@ -263,14 +299,16 @@ bool RvcVoice::run(const float* in, int n, float pitchSemis, std::vector<float>&
         {"phone", OnnxType::Float, {1, frames_, D}, phone_.data()},
         {"pitch", OnnxType::Int64, {1, frames_}, pitch_.data()},
         {"pitchf", OnnxType::Float, {1, frames_}, pitchf_.data()},
-        {"rnd", OnnxType::Float, {1, info_.inter, frames_}, rnd_.data()},
-        {"noise", OnnxType::Float, {1, samples_}, noise_.data()},
+        {"rnd", OnnxType::Float, {1, info_.inter, flowFrames_}, rnd_.data()},
+        {"noise", OnnxType::Float, {1, static_cast<int64_t>(noise_.size())}, noise_.data()},
     };
     if (!voice_.run(genIn, {"audio"}, res, error)) return false;
-    // Back to the caller's length (newest samples at the end).
+    times_.voice = since(t);
+    // Back to the caller's length (newest samples at the end; the context
+    // before the made audio stays silent).
     out.assign(static_cast<size_t>(n), 0.0f);
     const std::vector<float>& y = res[0];
-    for (int k = 0; k < n && k < samples_; ++k) out[static_cast<size_t>(n - 1 - k)] = y[y.size() - 1 - static_cast<size_t>(k)];
+    for (size_t k = 0; k < static_cast<size_t>(n) && k < y.size(); ++k) out[static_cast<size_t>(n) - 1 - k] = y[y.size() - 1 - k];
     return true;
 }
 

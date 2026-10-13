@@ -133,60 +133,87 @@ bool FaissIndex::load(const std::wstring& path, std::string* error) {
     return true;
 }
 
-void FaissIndex::retrieve(const float* query, int k, float* out, int probe) const {
+namespace {
+
+// Squared L2 distance, summed in 8 lanes (the compiler can vectorize that).
+float sqDist(const float* a, const float* b, size_t d) {
+    float acc[8] = {};
+    size_t i = 0;
+    for (; i + 8 <= d; i += 8)
+        for (size_t j = 0; j < 8; ++j) {
+            const float e = a[i + j] - b[i + j];
+            acc[j] += e * e;
+        }
+    float s = ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
+    for (; i < d; ++i) {
+        const float e = a[i] - b[i];
+        s += e * e;
+    }
+    return s;
+}
+
+// Keeps the `n` smallest (score, value) pairs (a max-heap).
+template <typename V>
+void keepSmallest(std::vector<std::pair<float, V>>& heap, size_t n, float score, V value) {
+    if (heap.size() < n) {
+        heap.emplace_back(score, value);
+        std::push_heap(heap.begin(), heap.end());
+    } else if (score < heap.front().first) {
+        std::pop_heap(heap.begin(), heap.end());
+        heap.back() = {score, value};
+        std::push_heap(heap.begin(), heap.end());
+    }
+}
+
+} // namespace
+
+void FaissIndex::retrieve(const float* query, int k, float* out, int probe) const { retrieveMany(query, 1, k, out, probe); }
+
+void FaissIndex::retrieveMany(const float* queries, int count, int k, float* out, int probe) const {
     const size_t d = static_cast<size_t>(dim_);
-    auto dist = [&](const float* v) {
-        float s = 0.0f;
-        for (size_t i = 0; i < d; ++i) {
-            const float e = v[i] - query[i];
-            s += e * e;
-        }
-        return s;
-    };
-    // Clusters to search.
-    std::vector<size_t> search;
+    if (count <= 0 || d == 0) return;
+    // The clusters each query searches: its nearest centroids, found in one
+    // pass over the centroids for all queries (they stay in the cache).
+    const size_t nlist = centroids_.empty() ? 1 : centroids_.size() / d;
+    const size_t p = std::min(nlist, static_cast<size_t>(std::max(1, probe)));
+    std::vector<std::vector<std::pair<float, size_t>>> near(static_cast<size_t>(count));
     if (centroids_.empty()) {
-        search.push_back(0);
+        for (auto& n : near) n.emplace_back(0.0f, 0);
     } else {
-        const size_t nlist = centroids_.size() / d;
-        std::vector<std::pair<float, size_t>> c(nlist);
-        for (size_t l = 0; l < nlist; ++l) c[l] = {dist(&centroids_[l * d]), l};
-        const size_t p = std::min<size_t>(nlist, static_cast<size_t>(std::max(1, probe)));
-        std::partial_sort(c.begin(), c.begin() + static_cast<long>(p), c.end());
-        for (size_t i = 0; i < p; ++i) search.push_back(c[i].second);
-    }
-    // The k nearest vectors (squared L2).
-    std::vector<std::pair<float, const float*>> best;
-    for (size_t l : search) {
-        const auto& list = lists_[l];
-        for (size_t v = 0; v + d <= list.size(); v += d) {
-            const float s = dist(&list[v]);
-            if (static_cast<int>(best.size()) < k) {
-                best.emplace_back(s, &list[v]);
-                std::push_heap(best.begin(), best.end());
-            } else if (s < best.front().first) {
-                std::pop_heap(best.begin(), best.end());
-                best.back() = {s, &list[v]};
-                std::push_heap(best.begin(), best.end());
-            }
+        for (size_t l = 0; l < nlist; ++l) {
+            const float* c = &centroids_[l * d];
+            for (int i = 0; i < count; ++i)
+                keepSmallest(near[static_cast<size_t>(i)], p, sqDist(c, queries + static_cast<size_t>(i) * d, d), l);
         }
     }
-    if (best.empty()) {
-        std::memcpy(out, query, d * sizeof(float));
-        return;
-    }
-    // Weights 1 / distance^2 (an exact match takes all the weight).
-    std::vector<double> w(best.size());
-    double total = 0.0;
-    for (size_t i = 0; i < best.size(); ++i) {
-        const double s = std::max(static_cast<double>(best[i].first), 1e-12);
-        w[i] = 1.0 / (s * s);
-        total += w[i];
-    }
-    for (size_t i = 0; i < d; ++i) {
-        double acc = 0.0;
-        for (size_t b = 0; b < best.size(); ++b) acc += w[b] * best[b].second[i];
-        out[i] = static_cast<float>(acc / total);
+    std::vector<std::pair<float, const float*>> best;
+    std::vector<double> w;
+    for (int i = 0; i < count; ++i) {
+        const float* query = queries + static_cast<size_t>(i) * d;
+        float* o = out + static_cast<size_t>(i) * d;
+        // The k nearest vectors (squared L2) in those clusters.
+        best.clear();
+        for (const auto& cl : near[static_cast<size_t>(i)]) {
+            const auto& list = lists_[cl.second];
+            for (size_t v = 0; v + d <= list.size(); v += d) keepSmallest(best, static_cast<size_t>(k), sqDist(&list[v], query, d), &list[v]);
+        }
+        if (best.empty()) {
+            std::memcpy(o, query, d * sizeof(float));
+            continue;
+        }
+        // Weights 1 / distance^2 (an exact match takes all the weight).
+        w.assign(best.size(), 0.0);
+        double total = 0.0;
+        for (size_t b = 0; b < best.size(); ++b) {
+            const double s = std::max(static_cast<double>(best[b].first), 1e-12);
+            w[b] = 1.0 / (s * s);
+            total += w[b];
+        }
+        for (size_t j = 0; j < d; ++j) {
+            double acc = 0.0;
+            for (size_t b = 0; b < best.size(); ++b) acc += w[b] * best[b].second[j];
+            o[j] = static_cast<float>(acc / total);
+        }
     }
 }
 

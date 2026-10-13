@@ -9,6 +9,7 @@
 // v1 and v2 models with pitch guidance and the HiFi-GAN vocoder.
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -42,7 +43,20 @@ public:
     //   rnd    float [1, inter, frames]   standard normal noise (latent)
     //   noise  float [1, frames*hop]      standard normal noise (source)
     // Output: audio float [1, frames*hop] at info().sampleRate.
-    bool buildGenerator(int frames, int speaker, std::vector<uint8_t>& out, std::string* error) const;
+    //
+    // With `decodeFrames` (0 = all), only the newest frames become audio, as
+    // RVC's own real-time mode does: the text encoder still reads every frame
+    // (the context), the flow starts kFlowReach frames before the newest ones
+    // (as far as it looks back) and the vocoder, the costly part, makes only
+    // the newest; so a long context costs little. Then rnd is
+    // [1, inter, flowFrames(frames, decodeFrames)], noise [1, decodeFrames*hop]
+    // and the output [1, decodeFrames*hop]: the newest audio.
+    bool buildGenerator(int frames, int speaker, std::vector<uint8_t>& out, std::string* error, int decodeFrames = 0) const;
+    static constexpr int kFlowReach = 24;
+    static int flowFrames(int frames, int decodeFrames) {
+        if (decodeFrames <= 0 || decodeFrames >= frames) return frames;
+        return std::min(frames, decodeFrames + kFlowReach);
+    }
 
 private:
     struct W {

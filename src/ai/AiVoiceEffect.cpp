@@ -20,29 +20,22 @@
 namespace echo {
 
 namespace {
-const char* const kResponseNames[] = {"Quicker", "Balanced", "Smoother", nullptr};
+const char* const kQualityNames[] = {"Fastest", "Fast", "Balanced", "Smooth", "Smoothest", nullptr};
 const ParamInfo kAiParams[] = {
     {"pitch", "Pitch", -24.0f, 24.0f, 0.0f, "st", ParamScale::Linear, nullptr,
      "Pitch shift passed to the model (only if the model supports it)"},
     {"mix", "Mix", 0.0f, 100.0f, 100.0f, "%", ParamScale::Linear},
     {"latency", "Buffer", 100.0f, 2000.0f, 100.0f, "ms", ParamScale::Linear, nullptr,
-     "Least delay. The delay is never shorter than the voice needs (see Response). Raise it if you hear dropouts."},
+     "Least delay. The delay is never shorter than the voice needs (see Quality). Raise it if you hear dropouts."},
     {"index", "Voice match", 0.0f, 100.0f, 50.0f, "%", ParamScale::Linear, nullptr,
      "RVC voices with an index: how strongly the index pulls your speech towards the voice's own sound"},
-    {"response", "Response", 0.0f, 2.0f, 1.0f, "", ParamScale::Enum, kResponseNames,
-     "RVC voices: Quicker answers sooner but can sound rougher; Smoother sounds cleaner but later"},
+    // Saved as "response" (its name before Echo 0.1.2).
+    {"response", "Quality", 0.0f, 4.0f, 2.0f, "", ParamScale::Enum, kQualityNames,
+     "RVC voices: faster is heard sooner, smoother sounds cleaner but a little later"},
 };
-
-// RVC voices are converted in pieces (chunk) with some audio before them
-// (context), blended over a crossfade: shorter pieces answer sooner, longer
-// ones sound smoother. Milliseconds: chunk, context, crossfade.
-void rvcResponse(int r, ai::ModelManifest& m) {
-    static const int kSizes[3][3] = {{120, 250, 30}, {150, 300, 40}, {250, 400, 60}};
-    const int* s = kSizes[std::clamp(r, 0, 2)];
-    m.chunkMs = s[0];
-    m.contextMs = s[1];
-    m.crossfadeMs = s[2];
-}
+constexpr int kQualitySteps = 5;
+constexpr int kSearchMs = 10; // how far a new piece may shift to line up with the last
+constexpr int kDecodeMarginMs = 60; // made before the piece too, so it isn't at the vocoder's edge
 ECHO_EFFECT_INFO(kAiInfo, "ai_voice", "AI Voice Conversion", "AI",
                  "Runs a voice model you added (RVC or ONNX) off the audio thread.", kAiParams, false);
 } // namespace
@@ -265,14 +258,66 @@ void AiVoiceEffect::processImpl(float* const* ch, int numCh, int n) {
     if (skipped > 0) underrunSamples.fetch_add(static_cast<uint64_t>(skipped), std::memory_order_relaxed);
 }
 
+int solaOffset(const std::vector<float>& wav, const std::vector<float>& tail, int search) {
+    const int n = static_cast<int>(tail.size()), mid = search / 2;
+    double eTail = 0.0;
+    for (float v : tail) eTail += static_cast<double>(v) * v;
+    if (eTail < 1e-9) return mid;
+    int bestOff = mid;
+    double best = -1e30;
+    for (int o = 0; o <= search; ++o) {
+        double num = 0.0, e = 0.0;
+        for (int k = 0; k < n; ++k) {
+            const double w = wav[static_cast<size_t>(o + k)];
+            num += w * tail[static_cast<size_t>(k)];
+            e += w * w;
+        }
+        const double score = num / std::sqrt(e * eTail + 1e-12) - 0.05 * std::abs(o - mid) / std::max(1, mid);
+        if (score > best) best = score, bestOff = o;
+    }
+    return bestOff;
+}
+
+namespace {
+
+// Time one run of a loaded voice on a voice-like buzz (silence would skip the
+// pitch tracking), after a warm-up run: graphics cards are slow the first time.
+double timeRuns(VoiceConverter& v, int samples, int sampleRate) {
+    std::vector<float> in(static_cast<size_t>(samples), 0.0f), out;
+    for (size_t i = 0; i < in.size(); ++i)
+        for (int h = 1; h <= 8; ++h)
+            in[i] += 0.1f / h * static_cast<float>(std::sin(2.0 * 3.14159265358979 * 140.0 * h * static_cast<double>(i) / sampleRate));
+    std::string err;
+    v.run(in.data(), samples, 0.0f, out, &err);
+    double total = 0.0;
+    for (int i = 0; i < 2; ++i) {
+        const auto t0 = std::chrono::steady_clock::now();
+        v.run(in.data(), samples, 0.0f, out, &err);
+        total += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    }
+    return total / 2.0;
+}
+
+} // namespace
+
+StreamPlan rvcStreamPlan(int quality) {
+    // chunk, context, crossfade, lookahead. Measured (docs/AI_VOICE.md): 2 s
+    // of context sounded best, also right after a pause (longer is worse
+    // after one); shorter pieces cost little with it; lookahead a little.
+    static const StreamPlan kPlans[kQualitySteps] = {
+        {80, 2000, 20, 0}, {100, 2000, 30, 0}, {120, 2000, 40, 20}, {150, 2000, 40, 60}, {200, 2000, 50, 100}};
+    return kPlans[std::clamp(quality, 0, kQualitySteps - 1)];
+}
+
 void AiVoiceEffect::workerMain() {
     std::unique_ptr<VoiceConverter> model;
     ModelManifest m;
     Resampler down, up;
     double ratioDown = 1.0, ratioUp = 1.0;
-    int chunkEng = 0, ctxModel = 0, xfModel = 0;
-    std::vector<float> chunkIn, history, modelIn, modelOut, emitted, tail, tmp, outEng;
+    int chunkEng = 0, ctxModel = 0, xfModel = 0, searchModel = 0, laModel = 0;
+    std::vector<float> chunkIn, history, modelIn, modelOut, wav, emitted, tail, fadeIn, tmp, outEng;
     bool haveTail = false;
+    bool continuous = false; // the next block follows on from the last
     uint64_t ack = syncAck_.load();
     using clock = std::chrono::steady_clock;
     float avgMs = 0.0f;
@@ -283,21 +328,37 @@ void AiVoiceEffect::workerMain() {
         up.reset();
         std::fill(history.begin(), history.end(), 0.0f);
         haveTail = false;
+        continuous = false;
     };
+    auto qualityParam = [&]() { return std::clamp(static_cast<int>(std::lround(p(4))), 0, kQualitySteps - 1); };
 
-    int response = -1; // the Response an RVC voice was loaded with
+    int quality = -1;     // the Quality an RVC voice was loaded with
+    int seenQuality = -1; // the newest value of the control, and since when
+    clock::time_point seenAt{};
     while (!stop_.load()) {
-        if (model && m.kind == "rvc" && static_cast<int>(std::lround(p(4))) != response) modelDirty_ = true;
+        if (model && m.kind == "rvc") {
+            // A new Quality rebuilds the voice: wait until the slider rests.
+            const int q = qualityParam();
+            if (q != seenQuality) {
+                seenQuality = q;
+                seenAt = clock::now();
+            } else if (q != quality && clock::now() - seenAt >= std::chrono::milliseconds(400)) {
+                modelDirty_ = true;
+            }
+        }
         if (modelDirty_.exchange(false)) {
             active_ = false;
             model.reset();
             ModelManifest next;
-            bool gpu = false, gpuAuto = false;
+            bool gpu = false, gpuAuto = false, fixedPlan = false;
+            StreamPlan plan;
             {
                 std::lock_guard<std::mutex> lock(modelMutex_);
                 next = pending_;
                 gpu = pendingGpu_;
                 gpuAuto = gpuAuto_;
+                fixedPlan = haveTestPlan_;
+                plan = testPlan_;
             }
             if (gpuAuto && next.valid) {
                 OrtRuntime& rt = OrtRuntime::instance();
@@ -315,17 +376,48 @@ void AiVoiceEffect::workerMain() {
                 std::unique_ptr<VoiceConverter> mdl;
                 std::string err;
                 bool loaded = false;
+                double runSec = 0.0;
                 if (next.kind == "rvc") {
-                    response = static_cast<int>(std::lround(p(4)));
-                    rvcResponse(response, next);
-                    // The networks are built for this block: context + chunk.
-                    auto rvc = std::make_unique<RvcVoice>();
-                    const int block = next.sampleRate * (next.contextMs + next.chunkMs) / 1000;
-                    loaded = rvc->load(next, gpu, block, &err);
-                    mdl = std::move(rvc);
+                    quality = seenQuality = qualityParam();
+                    seenAt = clock::now();
+                    if (!fixedPlan) plan = rvcStreamPlan(quality);
+                    // The context shrinks until a run fits in the time the
+                    // plan's delay leaves for it (the voice is rebuilt).
+                    const int sr = next.sampleRate;
+                    const int floorCtx = std::max(400, plan.crossfadeMs + kSearchMs + plan.lookaheadMs + kDecodeMarginMs + 100);
+                    for (int attempt = 0;; ++attempt) {
+                        auto rvc = std::make_unique<RvcVoice>();
+                        // + 10 ms: the resampler hands over a sample more now and then.
+                        const int block = sr * (plan.contextMs + plan.chunkMs + 10) / 1000;
+                        const int decode =
+                            sr * (plan.chunkMs + plan.crossfadeMs + kSearchMs + plan.lookaheadMs + kDecodeMarginMs) / 1000;
+                        loaded = rvc->load(next, gpu, block, &err, {}, decode);
+                        if (!loaded) break;
+                        runSec = timeRuns(*rvc, block, sr);
+                        // Fits when it adds no delay (see minLatency_) or, on a
+                        // slower PC, when it still takes at most 55 % of the time.
+                        const double budget = std::max((plan.chunkMs * 0.00025 + 0.03) / 1.5, plan.chunkMs * 0.00055);
+                        if (fixedPlan || runSec <= budget || plan.contextMs <= floorCtx || attempt >= 3) {
+                            mdl = std::move(rvc);
+                            break;
+                        }
+                        // The speech features and the pitch grow with the block;
+                        // the voice network mostly makes the newest audio. Aim a
+                        // little under the budget with what is left for them.
+                        const RvcVoice::StepTimes& t = rvc->lastTimes();
+                        const double grows = std::max(1e-4, t.prep + t.encoder + t.index + t.pitch);
+                        const double room = budget * 0.9 - std::max(0.0, runSec - grows);
+                        const double fit = room / grows * (plan.contextMs + plan.chunkMs) - plan.chunkMs;
+                        const int ctx = std::max(floorCtx, std::min(plan.contextMs - 100, static_cast<int>(fit) / 100 * 100));
+                        ECHO_LOG_INFO("AI voice: %.0f ms per run with %d ms of context (%.0f ms fit); trying %d ms", runSec * 1000.0,
+                                      plan.contextMs, budget * 1000.0, ctx);
+                        plan.contextMs = ctx;
+                    }
                 } else {
+                    plan = StreamPlan{next.chunkMs, next.contextMs, next.crossfadeMs, 0};
                     auto onnx = std::make_unique<OnnxVoiceModel>();
                     loaded = onnx->load(next, gpu, &err);
+                    if (loaded) runSec = timeRuns(*onnx, next.sampleRate * (plan.contextMs + plan.chunkMs) / 1000, next.sampleRate);
                     mdl = std::move(onnx);
                 }
                 if (!loaded) {
@@ -333,34 +425,40 @@ void AiVoiceEffect::workerMain() {
                     ECHO_LOG_WARN("AI model '%s' failed to load: %s", next.name.c_str(), err.c_str());
                 } else {
                     m = next;
+                    m.chunkMs = plan.chunkMs;
+                    m.contextMs = plan.contextMs;
+                    m.crossfadeMs = plan.crossfadeMs;
                     model = std::move(mdl);
+                    contextMs = plan.contextMs;
+                    loadedQuality = m.kind == "rvc" && !fixedPlan ? quality : -1;
                     const double eng = sr_;
-                    ratioDown = eng / m.sampleRate;
-                    ratioUp = m.sampleRate / eng;
-                    chunkEng = static_cast<int>(eng * m.chunkMs / 1000.0);
-                    ctxModel = m.sampleRate * m.contextMs / 1000;
-                    xfModel = m.sampleRate * m.crossfadeMs / 1000;
+                    const int sr = m.sampleRate;
+                    ratioDown = eng / sr;
+                    ratioUp = sr / eng;
+                    chunkEng = static_cast<int>(eng * plan.chunkMs / 1000.0);
+                    const int chunkModel = static_cast<int>(sr * plan.chunkMs / 1000.0);
+                    ctxModel = sr * plan.contextMs / 1000;
+                    xfModel = std::min(sr * plan.crossfadeMs / 1000, chunkModel / 2);
+                    laModel = sr * plan.lookaheadMs / 1000;
+                    // The piece played, its blend and the search must lie within the context.
+                    searchModel = std::clamp(ctxModel - xfModel - laModel, 0, sr * kSearchMs / 1000);
                     down.prepare(1, ratioDown, chunkEng + 64, ResamplerQuality::High);
-                    up.prepare(1, ratioUp, m.sampleRate * m.chunkMs / 1000 + 64, ResamplerQuality::High);
-                    const int chunkModel = static_cast<int>(m.sampleRate * m.chunkMs / 1000.0);
+                    up.prepare(1, ratioUp, chunkModel + 64, ResamplerQuality::High);
                     history.assign(static_cast<size_t>(ctxModel + chunkModel + 8), 0.0f);
                     tail.assign(static_cast<size_t>(xfModel), 0.0f);
-                    // Each emitted sample is converted audio from a crossfade
-                    // length earlier (the newest crossfade length is held
-                    // back to blend into the next chunk), so the wet stream
-                    // runs that much ahead of the input stream. (The
-                    // resamplers start with half a kernel in their history
-                    // and add only about a sample.)
-                    const double off = xfModel * eng / m.sampleRate;
+                    fadeIn.resize(static_cast<size_t>(xfModel));
+                    for (int k = 0; k < xfModel; ++k) {
+                        const double s = std::sin(0.5 * 3.14159265358979 * (k + 0.5) / xfModel);
+                        fadeIn[static_cast<size_t>(k)] = static_cast<float>(s * s);
+                    }
+                    // Each piece played starts lookahead + crossfade + search
+                    // before the newest audio of its run, less the shift that
+                    // lines it up (half the search, as planned): converted
+                    // sample i holds the voice of input sample i - that lag.
+                    // (The resamplers add only about a sample.)
+                    const double off = (laModel + xfModel + searchModel - searchModel / 2) * eng / sr;
                     wetOffset_ = static_cast<int>(std::lround(off));
-                    // The delay must leave room for a block to be converted:
-                    // time one (after a warm-up run) and allow 1.5x that.
-                    std::vector<float> warm(static_cast<size_t>(ctxModel + chunkModel), 0.0f), warmOut;
-                    std::string werr;
-                    model->run(warm.data(), static_cast<int>(warm.size()), 0.0f, warmOut, &werr);
-                    const auto w0 = clock::now();
-                    model->run(warm.data(), static_cast<int>(warm.size()), 0.0f, warmOut, &werr);
-                    const double runSec = std::chrono::duration<double>(clock::now() - w0).count();
+                    // The delay must leave room for a run: allow 1.5x its time.
                     minLatency_ = static_cast<int>(chunkEng + std::max(chunkEng * 0.25 + eng * 0.06, 1.5 * runSec * eng + eng * 0.03) + off);
                     {
                         std::lock_guard<std::mutex> lock(modelMutex_);
@@ -409,6 +507,7 @@ void AiVoiceEffect::workerMain() {
                 up.reset();
                 std::fill(history.begin(), history.end(), 0.0f);
                 haveTail = false;
+                continuous = false;
                 skippedSamples.fetch_add(skip);
             }
             chunkIn.resize(chunkEng);
@@ -427,6 +526,8 @@ void AiVoiceEffect::workerMain() {
             const auto t0 = clock::now();
             std::string err;
             model->setIndexRate(p(3) / 100.0f);
+            model->setAdvance(continuous ? static_cast<int>(tmp.size()) : 0);
+            continuous = true;
             if (!model->run(modelIn.data(), static_cast<int>(modelIn.size()), p(0), modelOut, &err)) {
                 setStatus(AiStatus::Error, "Inference failed: " + err);
                 ECHO_LOG_WARN("AI inference failed: %s", err.c_str());
@@ -440,25 +541,30 @@ void AiVoiceEffect::workerMain() {
             avgMs = chunksProcessed.load() == 0 ? static_cast<float>(ms) : avgMs * 0.9f + static_cast<float>(ms) * 0.1f;
             inferenceMs = avgMs;
             realtimeFactor = static_cast<float>(ms / m.chunkMs);
-            // Emit the chunk region shifted back by the crossfade length, and
-            // blend its first samples with the previous call's tail.
+            // This run's piece: chunk + crossfade + search, ending lookahead
+            // before the newest audio. Line it up with the last piece's end,
+            // blend over the crossfade, keep its own end for the next.
             const int L = static_cast<int>(modelOut.size());
             const int chunk = static_cast<int>(tmp.size());
-            emitted.assign(chunk, 0.0f);
+            const int need = chunk + xfModel + searchModel;
+            const int begin = L - laModel - need;
+            wav.assign(static_cast<size_t>(need), 0.0f);
+            for (int k = 0; k < need; ++k) {
+                const int idx = begin + k;
+                const float v = (idx >= 0 && idx < L) ? modelOut[static_cast<size_t>(idx)] : 0.0f;
+                wav[static_cast<size_t>(k)] = std::isfinite(v) ? v : 0.0f;
+            }
+            const int off = haveTail && searchModel > 0 ? solaOffset(wav, tail, searchModel) : searchModel / 2;
+            emitted.resize(static_cast<size_t>(chunk));
             for (int k = 0; k < chunk; ++k) {
-                const int idx = L - chunk - xfModel + k;
-                float v = (idx >= 0 && idx < L) ? modelOut[idx] : 0.0f;
-                if (!std::isfinite(v)) v = 0.0f;
-                if (k < xfModel && haveTail) {
-                    const float a = (k + 0.5f) / static_cast<float>(xfModel);
-                    v = tail[k] * (1.0f - a) + v * a;
+                float v = wav[static_cast<size_t>(off + k)];
+                if (haveTail && k < xfModel) {
+                    const float a = fadeIn[static_cast<size_t>(k)];
+                    v = v * a + tail[static_cast<size_t>(k)] * (1.0f - a);
                 }
-                emitted[k] = v;
+                emitted[static_cast<size_t>(k)] = v;
             }
-            for (int k = 0; k < xfModel; ++k) {
-                const int idx = L - xfModel + k;
-                tail[k] = (idx >= 0 && idx < L) ? modelOut[idx] : 0.0f;
-            }
+            for (int k = 0; k < xfModel; ++k) tail[static_cast<size_t>(k)] = wav[static_cast<size_t>(off + chunk + k)];
             haveTail = xfModel > 0;
             up.push(emitted.data(), chunk);
             const int outN = up.outputAvailable(ratioUp);

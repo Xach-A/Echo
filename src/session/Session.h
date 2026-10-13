@@ -121,7 +121,7 @@ struct UiSettings {
 // Version 2: noise suppression became a default part of microphone inputs.
 // Version 3: the soundboard got an input of its own in the mixer.
 // Version 4: the voice gate's default depth became -60 dB.
-constexpr int kSessionConfigVersion = 5;
+constexpr int kSessionConfigVersion = 6;
 
 struct Session {
     int configVersion = kSessionConfigVersion;

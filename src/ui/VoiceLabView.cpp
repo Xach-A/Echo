@@ -672,11 +672,23 @@ void EchoApp::drawAiPanel(StripModel& strip) {
     if (pop::SliderRow("Mix", v, "##aimix", &mix, 0.0f, 100.0f, 100.0f, w)) aiFx->setParam(1, mix);
     const int rx = aiFx->paramIndex("response");
     if (rx >= 0 && aiFx->modelKind() == "rvc") {
-        const char* rs[] = {"Quicker", "Balanced", "Smoother"};
-        int r = static_cast<int>(std::lround(aiFx->param(rx)));
-        pop::Label("Response");
-        if (pop::Segmented("##airesponse", &r, rs, 3, w)) aiFx->setParam(rx, static_cast<float>(r));
-        pop::Hint("Quicker: you're heard sooner, but the voice can sound rougher. Smoother: cleaner, but later.");
+        static const char* const names[] = {"Fastest", "Fast", "Balanced", "Smooth", "Smoothest"};
+        float q = aiFx->param(rx);
+        const int step = std::clamp(static_cast<int>(std::lround(q)), 0, 4);
+        // The delay: as measured once this step is loaded, estimated before.
+        const double sr = mc_->engine().sampleRate();
+        double delay = 0.0;
+        if (st == ai::AiStatus::Running && aiFx->loadedQuality.load() == step && sr > 0.0) {
+            delay = aiFx->latencySamples() / sr;
+        } else {
+            const ai::StreamPlan pl = ai::rvcStreamPlan(step);
+            const double runMs = aiFx->inferenceMs.load();
+            delay = (pl.chunkMs + std::max(pl.chunkMs * 0.25 + 60.0, 1.5 * runMs + 30.0) + pl.lookaheadMs + pl.crossfadeMs + 5.0) / 1000.0;
+        }
+        char qv[64];
+        std::snprintf(qv, sizeof(qv), "%s · about %.2f s", names[step], delay);
+        if (pop::SliderRow("Quality", qv, "##aiquality", &q, 0.0f, 4.0f, 2.0f, w)) aiFx->setParam(rx, std::round(q));
+        pop::Hint("Smoother sounds cleaner, but you're heard a little later. Each step reloads the voice.");
     }
     if (rt.hasGpu()) {
         bool gpu = aiFx->prefersGpu();

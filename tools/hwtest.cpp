@@ -1397,11 +1397,61 @@ int rvcOffline(const std::wstring& modelDir, const std::wstring& inWav, const st
     return 0;
 }
 
+// Times the steps of an RVC voice's runs (blocks of context + chunk, ms)
+// over a recording: ContentVec, the index, the pitch and the voice network.
+int rvcTime(const std::wstring& modelDir, const std::wstring& inWav, int ctxMs, int chunkMs, bool gpu) {
+    WavData w;
+    std::string err;
+    ai::ModelManifest m;
+    if (!readWav(inWav, w, &err) || !ai::loadManifest(modelDir, m)) {
+        std::printf("can't read the recording or the voice\n");
+        return 1;
+    }
+    std::vector<float> x(w.samples.size() / w.channels);
+    for (size_t i = 0; i < x.size(); ++i) x[i] = w.samples[i * w.channels];
+    x = resampleOffline(x, 1, w.sampleRate, m.sampleRate);
+    const int sr = m.sampleRate, block = sr * (ctxMs + chunkMs) / 1000, chunk = sr * chunkMs / 1000;
+    ai::RvcVoice v;
+    if (!v.load(m, gpu, block, &err, {}, sr * (chunkMs + 110) / 1000)) {
+        std::printf("load: %s\n", err.c_str());
+        return 1;
+    }
+    v.setIndexRate(0.5f);
+    ai::RvcVoice::StepTimes sum;
+    double total = 0.0;
+    int runs = 0;
+    std::vector<float> in(static_cast<size_t>(block)), out;
+    for (size_t end = static_cast<size_t>(chunk); end <= x.size(); end += static_cast<size_t>(chunk)) {
+        std::fill(in.begin(), in.end(), 0.0f);
+        const size_t take = std::min(end, in.size());
+        std::copy(x.begin() + static_cast<long>(end - take), x.begin() + static_cast<long>(end), in.end() - static_cast<long>(take));
+        if (runs > 0) v.setAdvance(chunk); // the block moved on by a chunk
+        const double t0 = monotonicSeconds();
+        if (!v.run(in.data(), block, 0.0f, out, &err)) {
+            std::printf("run: %s\n", err.c_str());
+            return 1;
+        }
+        if (++runs <= 2) continue; // warm-up
+        total += monotonicSeconds() - t0;
+        const auto& t = v.lastTimes();
+        sum.prep += t.prep;
+        sum.encoder += t.encoder;
+        sum.index += t.index;
+        sum.pitch += t.pitch;
+        sum.voice += t.voice;
+    }
+    const double n = std::max(1, runs - 2) / 1000.0;
+    std::printf("%s, context %d ms, chunk %d ms, %s: %.1f ms per run = 16 kHz %.1f + ContentVec %.1f + index %.1f + pitch %.1f + voice %.1f\n",
+                m.name.c_str(), ctxMs, chunkMs, v.provider().c_str(), total / n, sum.prep / n, sum.encoder / n, sum.index / n, sum.pitch / n, sum.voice / n);
+    return 0;
+}
+
 // Converts a WAV through the AI voice effect exactly as in real time
 // (48 kHz, 10 ms blocks at real-time pace) and writes the result.
-// response: 0 Quicker, 1 Balanced, 2 Smoother; gpu: DirectML if available.
+// quality: 0 Fastest .. 4 Smoothest; gpu: DirectML if available; plan (when
+// given): chunk, context, crossfade and lookahead in ms instead of quality's.
 int rvcConvert(const std::wstring& modelDir, const std::wstring& inWav, const std::wstring& outWav, float pitch, float index,
-               int response, bool gpu) {
+               int quality, bool gpu, const ai::StreamPlan* plan) {
     WavData w;
     std::string err;
     if (!readWav(inWav, w, &err) || w.channels < 1) {
@@ -1422,12 +1472,15 @@ int rvcConvert(const std::wstring& modelDir, const std::wstring& inWav, const st
     fx->prepare(48000.0, 480);
     fx->setParam("pitch", pitch);
     fx->setParam("index", index);
-    fx->setParam("response", static_cast<float>(response));
-    std::printf("response: %s\n", response == 0 ? "Quicker" : response == 2 ? "Smoother" : "Balanced");
+    fx->setParam("response", static_cast<float>(quality));
+    if (plan) ai->setStreamPlanForTesting(*plan);
+    const ai::StreamPlan p = plan ? *plan : ai::rvcStreamPlan(quality);
+    std::printf("quality %d: chunk %d, context %d, crossfade %d, lookahead %d ms\n", quality, p.chunkMs, p.contextMs, p.crossfadeMs,
+                p.lookaheadMs);
     const double t0 = monotonicSeconds();
     ai->setModel(m, gpu);
     while (ai->status() == ai::AiStatus::Loading && monotonicSeconds() - t0 < 120.0) Sleep(20);
-    std::printf("%s (%.1f s to load)\n", ai->statusText().c_str(), monotonicSeconds() - t0);
+    std::printf("%s (%.1f s to load; context %d ms)\n", ai->statusText().c_str(), monotonicSeconds() - t0, ai->contextMs.load());
     if (ai->status() != ai::AiStatus::Running) return 1;
     std::vector<float> y(x.size() + 48000 * 3, 0.0f); // room for the effect's delay
     std::copy(x.begin(), x.end(), y.begin());
@@ -1468,6 +1521,17 @@ int dmlProbe() {
     const std::vector<Case> cases = {
         {"Slice reversed", [](OnnxGraph& g) { g.output(g.op("Slice", {"x", g.ints({-1}), g.ints({-std::numeric_limits<int64_t>::max()}), g.ints({-1}), g.ints({-1})}), "y", OnnxType::Float, {1, 8, 64}); }},
         {"Slice", [](OnnxGraph& g) { g.output(g.op("Slice", {"x", g.ints({0, 63}), g.ints({7, 64}), g.ints({1, 2})}), "y", OnnxType::Float, {1, 7, 1}); }},
+        {"Slice newest (axis 2)", [](OnnxGraph& g) { g.output(g.op("Slice", {"x", g.ints({44}), g.ints({64}), g.ints({2})}), "y", OnnxType::Float, {1, 8, 20}); }},
+        {"Slice newest (flat)", [](OnnxGraph& g) {
+             const std::string f = g.op("Reshape", {"x", g.ints({1, 512})});
+             g.output(g.op("Slice", {f, g.ints({412}), g.ints({512}), g.ints({1})}), "y", OnnxType::Float, {1, 100});
+         }},
+        {"Slice newest + Conv", [](OnnxGraph& g) {
+             std::vector<float> w(8 * 8 * 3, 0.01f), b(8, 0.0f);
+             const std::string s = g.op("Slice", {"x", g.ints({44}), g.ints({64}), g.ints({2})});
+             g.output(g.op("Conv", {s, g.constant({8, 8, 3}, w), g.constant({8}, b)}, {ai::attrInts("kernel_shape", {3}), ai::attrInts("pads", {1, 1})}),
+                      "y", OnnxType::Float, {1, 8, 20});
+         }},
         {"Mod fmod", [](OnnxGraph& g) { g.output(g.op("Mod", {"x", g.scalar(1.0f)}, {ai::attrInt("fmod", 1)}), "y", OnnxType::Float, {1, 8, 64}); }},
         {"CumSum", [](OnnxGraph& g) { g.output(g.op("CumSum", {"x", g.constantInt64({}, {1})}), "y", OnnxType::Float, {1, 8, 64}); }},
         {"Pad", [](OnnxGraph& g) { g.output(g.op("Pad", {"x", g.ints({0, 1, 0, 0, 0, 0})}), "y", OnnxType::Float, {1, 9, 64}); }},
@@ -2149,10 +2213,15 @@ int wmain(int argc, wchar_t** argv) {
     if (argc > 4 && std::wstring(argv[1]) == L"rvc-offline")
         return rvcOffline(argv[2], argv[3], argv[4], argc > 5 ? static_cast<float>(_wtof(argv[5])) : 0.0f,
                           argc > 6 ? static_cast<float>(_wtof(argv[6])) : 50.0f, argc > 7 ? static_cast<unsigned>(_wtoi(argv[7])) : 1u);
-    if (argc > 4 && std::wstring(argv[1]) == L"rvc-convert")
+    if (argc > 5 && std::wstring(argv[1]) == L"rvc-time")
+        return rvcTime(argv[2], argv[3], _wtoi(argv[4]), _wtoi(argv[5]), argc > 6 && _wtoi(argv[6]) != 0);
+    if (argc > 4 && std::wstring(argv[1]) == L"rvc-convert") {
+        ai::StreamPlan plan;
+        if (argc > 12) plan = ai::StreamPlan{_wtoi(argv[9]), _wtoi(argv[10]), _wtoi(argv[11]), _wtoi(argv[12])};
         return rvcConvert(argv[2], argv[3], argv[4], argc > 5 ? static_cast<float>(_wtof(argv[5])) : 0.0f,
-                          argc > 6 ? static_cast<float>(_wtof(argv[6])) : 50.0f, argc > 7 ? _wtoi(argv[7]) : 1,
-                          argc > 8 && _wtoi(argv[8]) != 0);
+                          argc > 6 ? static_cast<float>(_wtof(argv[6])) : 50.0f, argc > 7 ? _wtoi(argv[7]) : 2,
+                          argc > 8 && _wtoi(argv[8]) != 0, argc > 12 ? &plan : nullptr);
+    }
     if (argc > 3 && std::wstring(argv[1]) == L"contentvec-run") return contentVecRun(argv[2], argv[3], argc > 4 ? _wtoi(argv[4]) : 12);
     std::wstring cmd = argc > 1 ? argv[1] : L"list";
     DeviceManager dm;
