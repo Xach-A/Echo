@@ -65,6 +65,19 @@ python -m pip install --user cmake ninja
 * `docs/BUILDING.md`, `docs/TESTING.md`, `docs/TROUBLESHOOTING.md`
 * `docs/VIRTUAL_DEVICES.md`, `docs/AI_VOICE.md`, `docs/FILE_FORMATS.md`
 
+## Code signing policy
+
+Release files are built from this repository by GitHub Actions
+(`.github/workflows/build.yml`: build, tests, installer and checksums), not on a
+personal computer. They are not code-signed yet.
+
+* Committers and reviewers: [Xach-A](https://github.com/Xach-A)
+* Approvers: [Xach-A](https://github.com/Xach-A)
+
+Privacy: this program will not transfer any information to other networked systems unless
+specifically requested by the user or the person installing or operating it (Echo goes online
+only for its download buttons and Check for updates).
+
 ## License
 
 MIT (see `LICENSE`). Third-party components: `THIRD_PARTY_NOTICES.md`.

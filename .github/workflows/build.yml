@@ -1,0 +1,71 @@
+# Builds, tests and packages Echo from source on GitHub's Windows machines, so
+# every release file can be traced to this repository (and later be signed).
+name: Build
+
+on:
+  push:
+    branches: [main, echo-0.1.0]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM-MinGW (the toolchain Echo is developed with; checksum verified)
+        shell: powershell
+        run: |
+          $ver = '20260908'
+          $name = "llvm-mingw-$ver-ucrt-x86_64"
+          $zip = Join-Path $env:RUNNER_TEMP "$name.zip"
+          Invoke-WebRequest "https://github.com/mstorsjo/llvm-mingw/releases/download/$ver/$name.zip" -OutFile $zip -UseBasicParsing
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne '1bcf74d06b724aeecaa6412ca85f5b26fb1da770e7cdcefa9263c9c5c3ad34b6') { throw "LLVM-MinGW checksum mismatch: $hash" }
+          & "$env:WINDIR\System32\tar.exe" -xf $zip -C $env:RUNNER_TEMP
+          if ($LASTEXITCODE) { throw 'Unpacking LLVM-MinGW failed' }
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:RUNNER_TEMP "$name\bin")
+
+      - name: Speech test material (Windows text-to-speech; the tests fall back to a synthetic voice without it)
+        shell: powershell
+        continue-on-error: true
+        run: ./tools/make_speech_samples.ps1 -OutDir build/release/test-speech
+
+      - name: Build, test and package
+        shell: powershell
+        run: |
+          # On failure, the important lines also go into the run's annotations
+          # (readable without opening the log).
+          $log = Join-Path $env:RUNNER_TEMP 'build.log'
+          $ok = $true
+          try {
+              ./build.ps1 -Package *>&1 | Tee-Object -FilePath $log
+              if ($LASTEXITCODE) { $ok = $false }
+          } catch {
+              $ok = $false
+              "$_" | Out-File -FilePath $log -Append
+          }
+          if (-not $ok) {
+              $lines = Get-Content $log
+              $hits = $lines | Select-String -Pattern 'ERROR|FAILED|error:|failed|SKIPPED|test cases|assertions|Exception|blocked' | ForEach-Object { $_.Line }
+              $msg = (@($hits | Select-Object -First 60) + '----- last lines -----' + @($lines | Select-Object -Last 40)) -join "`n"
+              $msg = $msg.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              Write-Host "::error title=Build, test and package::$msg"
+              exit 1
+          }
+
+      - name: Upload the release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: Echo-windows
+          path: |
+            build/package/*.exe
+            build/package/*.zip
+            build/package/SHA256SUMS.txt
+          if-no-files-found: error
