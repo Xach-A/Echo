@@ -34,7 +34,26 @@ jobs:
 
       - name: Build, test and package
         shell: powershell
-        run: ./build.ps1 -Package
+        run: |
+          # On failure, the important lines also go into the run's annotations
+          # (readable without opening the log).
+          $log = Join-Path $env:RUNNER_TEMP 'build.log'
+          $ok = $true
+          try {
+              ./build.ps1 -Package *>&1 | Tee-Object -FilePath $log
+              if ($LASTEXITCODE) { $ok = $false }
+          } catch {
+              $ok = $false
+              "$_" | Out-File -FilePath $log -Append
+          }
+          if (-not $ok) {
+              $lines = Get-Content $log
+              $hits = $lines | Select-String -Pattern 'ERROR|FAILED|error:|failed|SKIPPED|test cases|assertions|Exception|blocked' | ForEach-Object { $_.Line }
+              $msg = (@($hits | Select-Object -First 60) + '----- last lines -----' + @($lines | Select-Object -Last 40)) -join "`n"
+              $msg = $msg.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              Write-Host "::error title=Build, test and package::$msg"
+              exit 1
+          }
 
       - name: Upload the release files
         uses: actions/upload-artifact@v4
