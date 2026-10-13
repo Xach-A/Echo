@@ -33,6 +33,10 @@ Optional:
 ./build.ps1 -Package        # build, test, portable ZIP, installer, checksums
 ```
 
+GitHub Actions builds every push and tag the same way (`.github/workflows/build.yml`:
+LLVM-MinGW 20260908, checksum verified, then `./build.ps1 -Package`) and keeps the
+installer, portable zip and `SHA256SUMS.txt` as the run's artifact "Echo-windows".
+
 `build.ps1` finds LLVM-MinGW on PATH or in the winget package folder, and
 CMake/Ninja on PATH or in the Python user Scripts folder. If Echo is running from
 the build folder (it locks `Echo.exe`), the script asks it to save and quit

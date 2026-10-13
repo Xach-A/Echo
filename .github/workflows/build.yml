@@ -1,0 +1,47 @@
+# Builds, tests and packages Echo from source on GitHub's Windows machines, so
+# every release file can be traced to this repository (and later be signed).
+name: Build
+
+on:
+  push:
+    branches: [main, echo-0.1.0]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM-MinGW (the toolchain Echo is developed with; checksum verified)
+        shell: powershell
+        run: |
+          $ver = '20260908'
+          $name = "llvm-mingw-$ver-ucrt-x86_64"
+          $zip = Join-Path $env:RUNNER_TEMP "$name.zip"
+          Invoke-WebRequest "https://github.com/mstorsjo/llvm-mingw/releases/download/$ver/$name.zip" -OutFile $zip -UseBasicParsing
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne '1bcf74d06b724aeecaa6412ca85f5b26fb1da770e7cdcefa9263c9c5c3ad34b6') { throw "LLVM-MinGW checksum mismatch: $hash" }
+          & "$env:WINDIR\System32\tar.exe" -xf $zip -C $env:RUNNER_TEMP
+          if ($LASTEXITCODE) { throw 'Unpacking LLVM-MinGW failed' }
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:RUNNER_TEMP "$name\bin")
+
+      - name: Build, test and package
+        shell: powershell
+        run: ./build.ps1 -Package
+
+      - name: Upload the release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: Echo-windows
+          path: |
+            build/package/*.exe
+            build/package/*.zip
+            build/package/SHA256SUMS.txt
+          if-no-files-found: error
