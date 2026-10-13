@@ -41,6 +41,7 @@ EchoApp::EchoApp() = default;
 EchoApp::~EchoApp() {
     contentVecProgress_.cancel = true; // a download in progress stops (the future waits for it)
     ortProgress_.cancel = true;
+    updateProgress_.cancel = true;
     vbCableProgress_.cancel = true;
 }
 
@@ -668,6 +669,8 @@ void EchoApp::snapshotStep() {
         {"settings-startup", -1, Page::Settings, SettingsTab::Startup, nullptr, false},
         {"settings-reset", -1, Page::Settings, SettingsTab::Startup, nullptr, false},
         {"settings-diagnostics", -1, Page::Settings, SettingsTab::Diagnostics, nullptr, false},
+        {"settings-about", -1, Page::Settings, SettingsTab::About, nullptr, false},
+        {"settings-about-update", -1, Page::Settings, SettingsTab::About, nullptr, false},
         {"home-dark", -1, Page::Home, SettingsTab::Audio, "Deep Voice", false},
         {"voices-ai", -1, Page::Voices, SettingsTab::Audio, nullptr, false},
         {"voices-ai-setup", -1, Page::Voices, SettingsTab::Audio, nullptr, false},
@@ -725,6 +728,15 @@ void EchoApp::snapshotStep() {
             mc_->soundboard().play(1);
         }
         if (std::strcmp(st.file, "settings-reset") == 0) openResetPopup_ = true;
+        // An example of a found update (nothing is downloaded in snapshot mode).
+        update_ = UpdateState{};
+        if (std::strcmp(st.file, "settings-about-update") == 0) {
+            update_.stage = UpdateState::Available;
+            update_.release.version = "0.2.0";
+            update_.release.installerBytes = 9 << 20;
+            update_.release.installerName = "Echo-0.2.0-setup-win64.exe";
+            update_.release.notes = "**Highlights**\n- Voices are found in downloaded folders as they are\n- Check for updates in Settings > About";
+        }
         snapshotShowAi_ = std::strcmp(st.file, "voices-ai") == 0 || std::strcmp(st.file, "voices-ai-setup") == 0;
         snapshotNoOrt_ = std::strcmp(st.file, "voices-ai-setup") == 0;
         if (std::strcmp(st.file, "home-dark") == 0) {
@@ -1083,7 +1095,114 @@ void EchoApp::drawAbout() {
         else if (reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", docs.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) <= 32)
             toast("Couldn't open " + wideToUtf8(docs), 2);
     }
+    drawUpdates();
     pop::EndCard();
+}
+
+void EchoApp::drawUpdates() {
+    const Palette& p = pal();
+    const float sc = uiScale();
+    using U = UpdateState;
+    // Finished background work.
+    if (updateCheck_.valid() && updateCheck_.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+        update_ = updateCheck_.get();
+    if (updateDownload_.valid() && updateDownload_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        auto [err, installer] = updateDownload_.get();
+        if (err.empty() && win::startUpdate(installer, win::installKind(), &err)) {
+            ECHO_LOG_INFO("Updating to Echo %s; the installer restarts Echo", update_.release.version.c_str());
+            requestQuit(); // saves; the installer replaces Echo and starts it again
+            return;
+        }
+        update_.stage = U::Failed;
+        update_.error = err;
+    }
+    const std::string page = update_.release.pageUrl.empty() ? "https://github.com/" ECHO_UPDATE_REPO "/releases" : update_.release.pageUrl;
+    auto openPage = [&]() { ShellExecuteW(nullptr, L"open", utf8ToWide(page).c_str(), nullptr, nullptr, SW_SHOWNORMAL); };
+    auto startCheck = [this]() {
+        update_.stage = U::Checking;
+        updateCheck_ = std::async(std::launch::async, []() {
+            U s;
+            const win::UpdateCheck r = win::checkForUpdate(ECHO_VERSION_STRING, s.release, &s.error);
+            s.stage = r == win::UpdateCheck::Available ? U::Available : r == win::UpdateCheck::UpToDate ? U::UpToDate : U::Failed;
+            return s;
+        });
+    };
+
+    pop::Divider();
+    pop::Label("Updates");
+    switch (update_.stage) {
+    case U::Idle:
+        pop::Caption("Echo looks for a new version only when you click.");
+        if (pop::Button(ICON_REFRESH "  Check for updates")) startCheck();
+        break;
+    case U::Checking:
+        pop::Caption("Asking GitHub for the latest version...");
+        break;
+    case U::UpToDate:
+        ImGui::TextColored(toVec4(p.good), ICON_CHECK " You have the latest version (%s).", ECHO_VERSION_STRING);
+        if (pop::SmallButton("Check again")) startCheck();
+        break;
+    case U::Failed:
+        pop::TextColoredWrapped(p.bad, ("Couldn't update: " + update_.error).c_str());
+        if (pop::SmallButton("Try again")) startCheck();
+        ImGui::SameLine();
+        if (pop::SmallButton("Open the release page")) openPage();
+        break;
+    case U::Downloading: {
+        const double done = updateProgress_.done.load() / 1048576.0, total = std::max<double>(1.0, update_.release.installerBytes / 1048576.0);
+        char label[96];
+        std::snprintf(label, sizeof(label), "Downloading Echo %s: %.0f of %.0f MB", update_.release.version.c_str(), done, total);
+        ImGui::ProgressBar(static_cast<float>(done / total), ImVec2(std::min(ImGui::GetContentRegionAvail().x, 420.0f * sc), 0), label);
+        ImGui::SameLine();
+        if (pop::SmallButton("Cancel##update")) updateProgress_.cancel = true;
+        break;
+    }
+    case U::Available: {
+        ImGui::PushFont(fonts().semibold, 0.0f);
+        ImGui::TextColored(toVec4(p.good), "Echo %s is available%s (you have %s).", update_.release.version.c_str(),
+                           update_.release.prerelease ? " as a pre-release" : "", ECHO_VERSION_STRING);
+        ImGui::PopFont();
+        if (!update_.release.notes.empty()) {
+            // The release notes, without Markdown's ** and # marks.
+            std::string notes = update_.release.notes;
+            for (const char* mark : {"**", "## ", "# "})
+                for (size_t at; (at = notes.find(mark)) != std::string::npos;) notes.erase(at, std::strlen(mark));
+            ImGui::BeginChild("##notes", ImVec2(std::min(ImGui::GetContentRegionAvail().x, 640.0f * sc), 150.0f * sc),
+                              ImGuiChildFlags_Borders);
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextUnformatted(notes.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::EndChild();
+        }
+        if (win::installKind() != win::InstallKind::NotInstalled) {
+            if (pop::Button(ICON_DOWNLOAD "  Download and install", pop::Btn::Primary)) {
+                update_.stage = U::Downloading;
+                updateProgress_.cancel = false;
+                updateProgress_.done = 0;
+                const updates::Release r = update_.release;
+                updateDownload_ = std::async(std::launch::async, [this, r]() {
+                    std::string err;
+                    std::wstring installer;
+                    win::downloadUpdate(r, paths::localDataDir() + L"\\update", updateProgress_, &installer, &err);
+                    return std::make_pair(err, installer);
+                });
+            }
+            ImGui::SameLine();
+            if (pop::LinkButton("See it on GitHub")) openPage();
+            char hint[200];
+            std::snprintf(hint, sizeof(hint),
+                          "Downloads the installer from GitHub (%.0f MB), checks it, then Echo closes, updates and starts "
+                          "again. Your settings stay.",
+                          std::max<double>(1.0, update_.release.installerBytes / 1048576.0));
+            pop::Hint(hint);
+        } else {
+            if (pop::Button(ICON_OPEN "  Open the release page", pop::Btn::Primary)) openPage();
+            pop::Hint("This copy of Echo wasn't installed with Echo's installer (it's portable or self-built), so it can't "
+                      "update itself: get the new version from the release page.");
+        }
+        break;
+    }
+    }
 }
 
 } // namespace echo::ui

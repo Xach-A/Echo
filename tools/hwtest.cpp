@@ -28,6 +28,8 @@
 //                                 recording side: level, shape, latency, glitches (memory only)
 //   echo_hwtest hotkeys           push to talk / mute keys through Windows' real key state:
 //                                 presses F24, F23 and F22 (instant taps) with SendInput (keys no app uses)
+//   echo_hwtest update-check [version] [folder]  ask GitHub for a newer release (and download/check its installer)
+//   echo_hwtest voices [folder]    the voices Echo finds there (default: its voices folder) and their files
 //   echo_hwtest ort-install <folder>  install ONNX Runtime (DirectML build) there, as the AI setup button does
 //   echo_hwtest vbcable-download <folder>  download, check and unpack VB-Audio's VB-CABLE pack as the
 //                                 app's Install button does (doesn't open the installer)
@@ -49,6 +51,7 @@
 #include <thread>
 #include <vector>
 
+#include "Version.h"
 #include "ai/ContentVec.h"
 #include "ai/FaissIndex.h"
 #include "ai/OnnxGraph.h"
@@ -61,6 +64,7 @@
 #include "audio/Download.h"
 #include "audio/HotkeyService.h"
 #include "audio/OrtInstall.h"
+#include "audio/Updater.h"
 #include "audio/VbCable.h"
 #include "audio/AppSessions.h"
 #include "audio/AudioDecoder.h"
@@ -75,6 +79,7 @@
 #include "dsp/EffectRegistry.h"
 #include "dsp/NoiseSuppressorInfo.h"
 #include "core/SoundboardSource.h"
+#include "session/Paths.h"
 #include "session/Presets.h"
 #include "session/Soundboard.h"
 
@@ -1572,6 +1577,51 @@ int dmlProbe() {
     return failed == 0 ? 0 : 1;
 }
 
+// Asks GitHub for a release newer than `version` (default: this Echo's), as
+// Settings > About > Check for updates does; with a folder, also downloads
+// and checks its installer (without running it).
+int updateCheck(const std::string& version, const std::wstring& folder) {
+    updates::Release r;
+    std::string err;
+    const win::UpdateCheck c = win::checkForUpdate(version, r, &err);
+    if (c == win::UpdateCheck::Failed) {
+        std::printf("failed: %s\n", err.c_str());
+        return 1;
+    }
+    if (c == win::UpdateCheck::UpToDate) {
+        std::printf("%s is up to date\n", version.c_str());
+        return 0;
+    }
+    std::printf("newer: %s (%s)%s\n  page: %s\n  installer: %s (%llu bytes)\n  checksums: %s\n", r.version.c_str(), r.tag.c_str(),
+                r.prerelease ? " pre-release" : "", r.pageUrl.c_str(), r.installerName.c_str(),
+                static_cast<unsigned long long>(r.installerBytes), r.sumsUrl.empty() ? "(none)" : "SHA256SUMS.txt");
+    std::printf("this copy: %s\n", win::installKind() == win::InstallKind::NotInstalled ? "not installed by the installer"
+                                                                                          : "installed by the installer");
+    if (folder.empty()) return 0;
+    win::DownloadProgress prog;
+    std::wstring installer;
+    const double t0 = monotonicSeconds();
+    if (!win::downloadUpdate(r, folder, prog, &installer, &err)) {
+        std::printf("download failed: %s\n", err.c_str());
+        return 1;
+    }
+    std::printf("downloaded and checked in %.1f s: %s\n", monotonicSeconds() - t0, wideToUtf8(installer).c_str());
+    return 0;
+}
+
+// Lists the voices Echo finds in a voices folder (default: Echo's own), with
+// the files it picked for each.
+int listVoices(const std::wstring& dir) {
+    const auto voices = ai::scanModels(dir);
+    std::printf("%zu voice(s) in %s\n", voices.size(), wideToUtf8(dir).c_str());
+    for (const auto& m : voices) {
+        std::printf("- %s [%s] %s\n", m.name.c_str(), m.id.c_str(), m.valid ? m.description.c_str() : ("NOT USABLE: " + m.error).c_str());
+        if (!m.pthPath.empty()) std::printf("    voice: %s\n", wideToUtf8(m.pthPath).c_str());
+        if (!m.indexPath.empty()) std::printf("    index: %s\n", wideToUtf8(m.indexPath).c_str());
+    }
+    return 0;
+}
+
 int faissInfo(const std::wstring& path) {
     ai::FaissIndex idx;
     std::string err;
@@ -2089,6 +2139,9 @@ int wmain(int argc, wchar_t** argv) {
     if (argc > 2 && std::wstring(argv[1]) == L"torch-info") return torchInfo(argv[2]);
     if (argc > 3 && std::wstring(argv[1]) == L"rvc-run") return rvcRun(argv[2], argv[3]);
     if (argc > 2 && std::wstring(argv[1]) == L"faiss-info") return faissInfo(argv[2]);
+    if (argc > 1 && std::wstring(argv[1]) == L"update-check")
+        return updateCheck(argc > 2 ? wideToUtf8(argv[2]) : std::string(ECHO_VERSION_STRING), argc > 3 ? std::wstring(argv[3]) : std::wstring());
+    if (argc > 1 && std::wstring(argv[1]) == L"voices") return listVoices(argc > 2 ? std::wstring(argv[2]) : paths::modelsDir());
     if (argc > 2 && std::wstring(argv[1]) == L"contentvec-download") return contentVecDownload(argv[2]);
     if (argc > 2 && std::wstring(argv[1]) == L"vbcable-download") return vbCableDownload(argv[2]);
     if (argc > 2 && std::wstring(argv[1]) == L"ort-install") return ortInstall(argv[2]);

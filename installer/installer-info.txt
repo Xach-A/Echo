@@ -8,8 +8,9 @@ What it does NOT do
   * It installs no drivers, services or background updaters.
   * It does not change your Windows default playback or recording devices.
   * It downloads nothing. Echo itself goes online only when you click one of its
-    download buttons (Install VB-CABLE, Install the AI engine, Download ContentVec),
-    and checks every download before keeping it. No accounts, ads or telemetry.
+    download buttons (Install VB-CABLE, Install the AI engine, Download ContentVec)
+    or Check for updates, and checks every download before keeping it. No accounts,
+    ads or telemetry.
 
 Virtual microphone (Discord, Roblox, OBS, games)
   Other apps hear Echo through a virtual audio cable driver, a separate product.

@@ -7,7 +7,7 @@ LLVM-MinGW clang 23.1.1, Release build).
 
 ## 1. Automated tests (`echo_tests.exe`)
 
-162 test cases, **4120 assertions, all passing** (2026-10-12; the 97 cases of
+166 test cases, **4183 assertions, all passing** (2026-10-13; the 97 cases of
 2026-10-09 also ran under AddressSanitizer + UndefinedBehaviorSanitizer with zero
 reports, see section 5). They use generated signals,
 the real engine and controller code, and in-memory fake devices (no audio
@@ -41,7 +41,8 @@ synthetic noise/click/silence/echo cases still run.
 | Clock drift (simulated time) | 300 ppm device drift with ±1.5 ms packet jitter for 150 s: capture correction 268…332 ppm (−64…+1404 ppm without packet timestamps), render −328…−264 ppm (−1390…+81); a microphone that loses two packets twice drops out once, then the adaptive margin absorbs the repeat |
 | Device opening | asynchronous opening: ready, failed (Windows' reason shown, retried) and hung (timed out) devices, the engine keeps running meanwhile; inputs/outputs set to the Windows default follow a default-device change |
 | Latency reporting | every latency-reporting effect's reported delay equals its measured delay (noise suppressor 960, echo canceller 768, spectral NR 1024, limiter 96, robot 512, autotune 2180, pitch shifter 1024/2048/4096 samples) |
-| RVC voices | a .pth read without running it (settings, 457 tensors of a real voice identical to PyTorch's); the voice network as an ONNX graph vs the official Applio code on a tiny random voice (max difference 2.4e-7) and a real v2 voice (5.3e-6, 106 dB); ContentVec vs Hugging Face's HuBERT on a tiny model (2.9e-6) and the real one (2.6e-5); FAISS IVF-Flat retrieval vs the RVC formula; coarse pitch; voice folders (found, or a message saying what to put there); the real-time pipeline on blocks (also one sample short); odd upsampling rates in 2-D equal the 1-D form; on the graphics card (DirectML build, RTX 5070 Ti Laptop GPU) the voice network and ContentVec match the CPU (3.6e-7, 2.7e-6; skipped with the CPU build); SHA-256 |
+| RVC voices | a .pth read without running it (settings, 457 tensors of a real voice identical to PyTorch's); the voice network as an ONNX graph vs the official Applio code on a tiny random voice (max difference 2.4e-7) and a real v2 voice (5.3e-6, 106 dB); ContentVec vs Hugging Face's HuBERT on a tiny model (2.9e-6) and the real one (2.6e-5); FAISS IVF-Flat retrieval vs the RVC formula; coarse pitch; voice folders (found, or a message saying what to put there); downloaded layouts (RVC's weights/logs layout with G_/D_ training files and a `trained_` index, a two-voice pack where one voice has no index, loose files, a folder with only a training file); the real-time pipeline on blocks (also one sample short); odd upsampling rates in 2-D equal the 1-D form; on the graphics card (DirectML build, RTX 5070 Ti Laptop GPU) the voice network and ContentVec match the CPU (3.6e-7, 2.7e-6; skipped with the CPU build); SHA-256 |
+| Updates | versions read and compared; the newest published release (drafts skipped, pre-releases counted) and its installer and checksum file picked from a GitHub-style list; up to date, empty list and GitHub errors told apart; checksums read from SHA256SUMS.txt (both line styles) |
 | VB-CABLE install | the pinned official download (address, size, SHA-256); unpacking a zip with Windows' tar, and refusing a broken one |
 | AI pipeline | manifest validation (licence required); transparent without a model; **real ONNX Runtime** (1.30.0 CPU build and 1.24.4 DirectML build) inference: max audio-thread call 0.15 ms, 0 dry fallbacks after warm-up, 400 ms fixed latency, output level 0.150 (expected 0.15) and stop-band removed; graceful failure on a mismatched model; model selection persisted; the converted voice lands exactly at the reported latency (irregular 440 Hz bursts through the test model: 0 ms off); **overload** (inference ~2.6x slower than real time, test-only delay): audio thread max 0.24 ms, explicit dry fallback (counted, shown in the UI), stale input skipped instead of queued, full AI output back within 1 s after the load drops |
 
@@ -74,7 +75,7 @@ machine:
 
 `Echo.exe --ui-snapshots=<dir>` renders all pages and every setup-wizard step
 into PNG files using a throwaway profile, with real devices running. All 17
-snapshots (33 now: every screen incl. the Soundboard and mixed voices, the effects editor, Settings sections, all 7 setup
+snapshots (35 now: every screen incl. the Soundboard and mixed voices, the effects editor, Settings sections, all 7 setup
 steps, the virtual-mic step and the Devices page as without a cable (Install VB-CABLE), Home in the dark theme, the AI voice setup with and without the AI engine, and the Midnight, Rose, High contrast and custom themes) (including the Voices screen's noise & echo controls with live noise suppression and
 echo cancellation on the real microphone) were reviewed; the app ran with live metering from the real
 microphone, 0 dropouts, ~1 % DSP load, and exited cleanly. Normal launch,

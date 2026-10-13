@@ -274,6 +274,68 @@ TEST_CASE("rvc: voice folders: an RVC voice is found, a folder without one says 
     std::filesystem::remove_all(empty, ec);
 }
 
+TEST_CASE("rvc: voices are found in subfolders, several to a folder and loose; training files are skipped") {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / "echo-test-voices";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    const fs::path voice = rvcData("tiny-voice/tiny.pth"), index = rvcData("tiny-voice/tiny.index"), junk = rvcData("cv_audio.bin");
+    auto put = [&](const fs::path& from, const fs::path& to) {
+        fs::create_directories(to.parent_path(), ec);
+        fs::copy_file(from, to, fs::copy_options::overwrite_existing, ec);
+        REQUIRE_FALSE(ec);
+    };
+    // RVC's own layout: the voice in weights\, its index next to the training
+    // checkpoints in logs\<name>\.
+    put(voice, root / "Classic" / "weights" / "Tiny_e300_s1200.pth");
+    put(junk, root / "Classic" / "logs" / "Tiny" / "G_2333.pth");
+    put(junk, root / "Classic" / "logs" / "Tiny" / "D_2333.pth");
+    put(index, root / "Classic" / "logs" / "Tiny" / "trained_IVF4_Flat_nprobe_1_Tiny_v2.index");
+    put(index, root / "Classic" / "logs" / "Tiny" / "added_IVF4_Flat_nprobe_1_Tiny_v2.index");
+    // Two voices in one folder, one of them with an index.
+    put(voice, root / "Pack" / "a" / "alpha.pth");
+    put(index, root / "Pack" / "a" / "alpha.index");
+    put(voice, root / "Pack" / "b" / "beta.pth");
+    // Straight into the voices folder.
+    put(voice, root / "loose.pth");
+    put(index, root / "added_loose.index");
+    // Nothing playable.
+    put(junk, root / "Junk" / "D_1.pth");
+
+    const std::vector<ai::ModelManifest> all = ai::scanModels(root.wstring());
+    auto byId = [&](const std::string& id) -> const ai::ModelManifest* {
+        for (const auto& m : all)
+            if (m.id == id) return &m;
+        return nullptr;
+    };
+    CHECK(all.size() == 5);
+    const ai::ModelManifest* classic = byId("Classic");
+    REQUIRE(classic);
+    CHECK(classic->valid);
+    CHECK(fs::path(classic->pthPath).filename() == "Tiny_e300_s1200.pth");
+    CHECK(fs::path(classic->indexPath).filename() == "added_IVF4_Flat_nprobe_1_Tiny_v2.index");
+    CHECK(classic->name == "Tiny test voice");
+    const ai::ModelManifest* alpha = byId("Pack/alpha");
+    const ai::ModelManifest* beta = byId("Pack/beta");
+    REQUIRE(alpha);
+    REQUIRE(beta);
+    CHECK(alpha->valid);
+    CHECK(fs::path(alpha->indexPath).filename() == "alpha.index");
+    CHECK(beta->valid);
+    CHECK(beta->indexPath.empty()); // alpha's index is not beta's
+    CHECK(alpha->name == "Tiny test voice (alpha)");
+    CHECK(beta->name == "Tiny test voice (beta)");
+    const ai::ModelManifest* loose = byId("loose.pth");
+    REQUIRE(loose);
+    CHECK(loose->valid);
+    CHECK(fs::path(loose->indexPath).filename() == "added_loose.index");
+    const ai::ModelManifest* bad = byId("Junk");
+    REQUIRE(bad);
+    CHECK_FALSE(bad->valid);
+    CHECK(bad->error.find("No playable voice") != std::string::npos);
+    fs::remove_all(root, ec);
+}
+
 TEST_CASE("rvc: the real-time pipeline converts blocks of voice") {
     if (!ortAvailable()) return;
     ai::ModelManifest m;
