@@ -12,6 +12,7 @@ const char* sourceKindName(SourceKind k) {
     case SourceKind::ProcessLoopback: return "Application";
     case SourceKind::SystemExcludingEcho: return "System audio (excluding Echo)";
     case SourceKind::ToneGenerator: return "Test signal";
+    case SourceKind::Soundboard: return "Soundboard";
     }
     return "?";
 }

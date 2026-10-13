@@ -4,6 +4,7 @@
 #include <filesystem>
 
 #include "core/Text.h"
+#include "dsp/Effect.h"
 #include "session/MixerController.h"
 
 namespace echo {
@@ -12,6 +13,23 @@ namespace {
 
 json fx(const char* type, json params = json::object()) {
     return json{{"type", type}, {"bypass", false}, {"params", std::move(params)}};
+}
+
+// An effect that is part of a preset but starts switched off (an optional
+// variation the user can turn on).
+json fxOff(const char* type, json params = json::object()) {
+    json j = fx(type, std::move(params));
+    j["bypass"] = true;
+    return j;
+}
+
+// Gives an effect a quick control on the Voices screen: "intensity" (a
+// distortion stage's drive, see applyIntensity) or "optional" (an on/off
+// switch). Effects ignore these keys; they stay in exported presets.
+json withUi(json j, const char* control, float makeup = 0.0f) {
+    j["ui"] = control;
+    if (makeup > 0.0f) j["ui_makeup"] = makeup;
+    return j;
 }
 
 ChainPreset make(const char* name, const char* cat, const char* desc, json chain) {
@@ -32,6 +50,17 @@ std::string safeFileName(const std::string& name) {
 }
 
 } // namespace
+
+void applyIntensity(Effect& stage, const json& presetEffect, float drive) {
+    const int d = stage.paramIndex("drive"), o = stage.paramIndex("output");
+    if (d < 0) return;
+    stage.setParam(d, drive);
+    const float makeup = presetEffect.value("ui_makeup", 0.0f);
+    const auto it = presetEffect.find("params");
+    if (o < 0 || makeup <= 0.0f || it == presetEffect.end() || !it->contains("drive") || !it->contains("output")) return;
+    const float base = it->value("drive", drive), out = it->value("output", 0.0f);
+    stage.setParam(o, out + makeup * std::max(0.0f, base - drive));
+}
 
 std::vector<ChainPreset> factoryChainPresets() {
     std::vector<ChainPreset> v;
@@ -141,6 +170,32 @@ std::vector<ChainPreset> factoryChainPresets() {
                      json::array({fx("character", {{"mode", 2}, {"intensity", 80}, {"noise", -52}}), limiter})));
     v.push_back(make("Megaphone", "Voice changer", "Distorted bullhorn voice.",
                      json::array({fx("character", {{"mode", 3}, {"intensity", 75}}), limiter})));
+    // A blown-out microphone (modelled on reference recordings of one): the
+    // voice is driven so hard that it clips at full scale, as loud as digital
+    // audio goes, with no low-pass and no limiter holding it back. Two
+    // clipping stages (preamp, then the converter at full scale) square the
+    // voice off; pre-emphasis before them and de-emphasis after (the classic
+    // clipped-speech trick) keep consonants audible, so the words stay
+    // understandable, and leave the voice's natural, warm balance. The
+    // compressor in front makes quiet microphones clip just as hard (its fast
+    // attack settles within a cycle, so switching the voice on does not
+    // overshoot); the gate keeps the huge gain from turning room noise into a
+    // roar between words. Measured on speech at -20 dBFS RMS: about -5 LUFS
+    // out, crest 2 dB in the loudest passages, peaks just under 0 dBFS.
+    v.push_back(make("Pain", "Voice changer",
+                     "Blown-out mic, clipping as loud as it gets: crushed and distorted, but the words still come through.",
+                     json::array({fx("gate", {{"threshold", -48}, {"hysteresis", 6}, {"attack", 1}, {"hold", 150}, {"release", 150}, {"range", -80}}),
+                                  fx("filter", {{"hp_on", 1}, {"hp_freq", 90}, {"hp_slope", 1}}),
+                                  fx("compressor", {{"threshold", -45}, {"ratio", 10}, {"attack", 0.2}, {"release", 80}, {"knee", 6}, {"makeup", 18}}),
+                                  fx("eq", {{"b1_freq", 250}, {"b1_gain", -6}, {"b4_freq", 2500}, {"b4_gain", 6}, {"b4_q", 0.8}}),
+                                  fx("distortion", {{"drive", 24}, {"type", 2}, {"low_cut", 80}, {"tone", 16000}, {"output", -8}, {"mix", 100}}),
+                                  withUi(fx("distortion", {{"drive", 20}, {"type", 1}, {"low_cut", 70}, {"tone", 16000}, {"output", -7}, {"mix", 100}}),
+                                         "intensity", 0.6f),
+                                  fx("eq", {{"b1_freq", 250}, {"b1_gain", 6}, {"b2_freq", 350}, {"b2_gain", 3}, {"b2_q", 0.9},
+                                            {"b4_freq", 2500}, {"b4_gain", -6}, {"b4_q", 0.8}}),
+                                  withUi(fxOff("bitcrusher", {{"bits", 6}, {"downsample", 4}, {"mix", 60}}), "optional"),
+                                  fx("distortion", {{"drive", 6}, {"type", 1}, {"low_cut", 20}, {"tone", 16000}, {"output", -1}, {"mix", 100}}),
+                                  fx("limiter", {{"drive", 0}, {"ceiling", -0.1}})})));  // a safety net; the -1 dB after the last clipper leaves room for its filter overshoot
     v.push_back(make("Stadium PA", "Voice changer", "Public-address system with slap-back echoes.",
                      json::array({fx("character", {{"mode", 4}, {"intensity", 55}}),
                                   fx("reverb", {{"decay", 2.5}, {"mix", 20}, {"size", 1.4}}), limiter})));

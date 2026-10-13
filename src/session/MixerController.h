@@ -17,6 +17,7 @@
 
 #include "core/Engine.h"
 #include "core/Recorder.h"
+#include "core/SoundboardSource.h"
 #include "session/DeviceBackend.h"
 #include "session/Session.h"
 
@@ -25,6 +26,17 @@ namespace echo {
 struct ChainTarget {
     bool bus = false;
     uint32_t id = 0;
+};
+
+// What "Reset to defaults" resets. The user's presets, recordings, AI
+// models and sound files are never touched.
+struct ResetParts {
+    bool mixer = true;      // inputs, outputs, routing, voices and effects
+    bool hotkeys = true;    // push to talk, mute key, voice hotkeys
+    bool soundboard = true; // back to Echo's built-in sounds, no keys
+    bool audio = true;      // sample rate, buffer, quality, recording folder and format
+    bool look = true;       // theme, colour, size, tooltips, closing to the notification area
+    bool any() const { return mixer || hotkeys || soundboard || audio || look; }
 };
 
 struct FeedbackWarning {
@@ -116,6 +128,16 @@ public:
     // ---- generator ----
     ToneSource& tone() { return *tone_; }
 
+    // ---- soundboard ----
+    SoundboardSource& soundboard() { return *soundboard_; }
+    // Swaps the sounds and publishes the graph (which keeps them alive while
+    // the engine may still be playing the old ones).
+    void setSoundBank(std::shared_ptr<const SoundBank> bank);
+    // The mixer input the soundboard plays through ("Soundboard"): sent to the
+    // virtual mic and the headphones. Created if missing; returns its id.
+    uint32_t ensureSoundboardStrip();
+    StripModel* soundboardStrip();
+
     // ---- recording ----
     bool startRecording(const std::vector<RecordingTarget>& targets, std::string* error);
     void stopRecording();
@@ -135,6 +157,10 @@ public:
     // ---- defaults / persistence support ----
     // Fills the session with a useful starting configuration.
     void createDefaultSession();
+    // Settings > Reset to defaults: puts the chosen parts back as a fresh
+    // installation has them (the window keeps its place and size). Restarts
+    // audio when inputs/outputs or the audio format change.
+    void resetSettings(const ResetParts& parts);
     // Replaces the whole session (e.g. after loading a file). Restarts audio.
     void replaceSession(Session s);
     // Prepares runtime objects of every strip/bus/effect for the current format.
@@ -207,6 +233,7 @@ private:
     Session session_;
     Engine engine_;
     std::shared_ptr<ToneSource> tone_;
+    std::shared_ptr<SoundboardSource> soundboard_;
     Recorder recorder_;
     std::map<std::string, SourceEntry> sources_;
     std::map<std::string, SinkEntry> sinks_;

@@ -29,6 +29,7 @@ Copy-Item (Join-Path $BuildDir 'bin\echo_hwtest.exe') $stage
 foreach ($f in 'LICENSE', 'README.md', 'THIRD_PARTY_NOTICES.md') { Copy-Item (Join-Path $root $f) $stage }
 Copy-Item -Recurse (Join-Path $root 'docs') (Join-Path $stage 'docs')
 Copy-Item -Recurse (Join-Path $root 'presets') (Join-Path $stage 'presets')
+Copy-Item -Recurse (Join-Path $root 'sounds') (Join-Path $stage 'sounds') # the soundboard's built-in sounds + CREDITS.txt
 New-Item -ItemType Directory -Force (Join-Path $stage 'tools') | Out-Null
 Copy-Item (Join-Path $root 'tools\fetch_onnxruntime.ps1') (Join-Path $stage 'tools')
 New-Item -ItemType Directory -Force (Join-Path $stage 'ai') | Out-Null

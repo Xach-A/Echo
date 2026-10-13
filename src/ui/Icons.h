@@ -32,6 +32,7 @@
 #define ICON_DIAGNOSTIC "\xee\xa7\x99"   // E9D9
 #define ICON_POWER "\xee\x9f\xa8"        // E7E8
 #define ICON_SYNC "\xee\xa2\x95"         // E895
+#define ICON_DOWNLOAD "\xee\xa2\x96"     // E896
 #define ICON_CHECK "\xee\x9c\xbe"        // E73E
 #define ICON_UP "\xee\x9c\x8e"           // E70E
 #define ICON_DOWN "\xee\x9c\x8d"         // E70D

@@ -121,8 +121,8 @@ void EchoApp::drawSettings() {
         pop::CardTitle("Audio engine");
         Engine& e = mc_->engine();
         char line[200];
-        std::snprintf(line, sizeof(line), "%s · %d Hz · %d samples (%.1f ms) · %s", e.running() ? "Running" : "Stopped",
-                      e.sampleRate(), e.blockSize(), e.blockSeconds() * 1000.0, mc_->clockDescription().c_str());
+        std::snprintf(line, sizeof(line), "%s · %d Hz · %s buffer · %s", e.running() ? "Running" : "Stopped", e.sampleRate(),
+                      bufferSizeName(e.blockSize(), e.sampleRate()).c_str(), mc_->clockDescription().c_str());
         pop::Caption(line);
         if (pop::SmallButton(e.running() ? "Stop audio" : "Start audio", e.running() ? pop::Btn::Secondary : pop::Btn::Primary)) {
             if (e.running()) mc_->stop();
@@ -148,15 +148,14 @@ void EchoApp::drawSettings() {
         }
         pop::Divider();
         const int blocks[] = {64, 128, 256, 480, 512, 1024, 2048};
-        char cur[48];
-        std::snprintf(cur, sizeof(cur), "%d samples (%.1f ms)", pendingEngine_.blockSize,
-                      pendingEngine_.blockSize * 1000.0 / pendingEngine_.sampleRate);
+        const std::string cur = bufferSizeName(pendingEngine_.blockSize, pendingEngine_.sampleRate);
         settingRow("Buffer size", "Smaller means less delay but needs more CPU. If you hear crackles, go bigger.", comboW);
-        if (ImGui::BeginCombo("##block", cur)) {
+        if (ImGui::BeginCombo("##block", cur.c_str())) {
             for (int b : blocks) {
-                char lbl[48];
-                std::snprintf(lbl, sizeof(lbl), "%d samples (%.1f ms)", b, b * 1000.0 / pendingEngine_.sampleRate);
-                if (ImGui::Selectable(lbl, b == pendingEngine_.blockSize)) pendingEngine_.blockSize = b;
+                ImGui::PushID(b);
+                if (ImGui::Selectable(bufferSizeName(b, pendingEngine_.sampleRate).c_str(), b == pendingEngine_.blockSize))
+                    pendingEngine_.blockSize = b;
+                ImGui::PopID();
             }
             ImGui::EndCombo();
         }
@@ -210,31 +209,141 @@ void EchoApp::drawSettings() {
     case SettingsTab::Appearance: {
         pop::BeginCard("##look", 0.0f, 0.0f, false, 20.0f, 14.0f);
         pop::Label("Theme");
-        int theme = std::clamp(s.ui.theme, 0, 2);
-        const char* themes[] = {"Light", "Dark", "Match Windows"};
-        if (pop::Segmented("##theme", &theme, themes, 3, 420.0f * sc)) {
-            s.ui.theme = theme;
-            setDpiScale(dpi_);
+        {
+            // A small preview of every theme: its background, a card with
+            // text, and the accent colour.
+            const ThemeColors mine{s.ui.customBackground, s.ui.customSurface, s.ui.customText};
+            const float avail = ImGui::GetContentRegionAvail().x, gap = 12.0f * sc;
+            const int cols = pop::columnsFor(avail, 118.0f * sc, gap);
+            const float tw = (avail - gap * (cols - 1)) / cols, ph = 62.0f * sc, th = ph + 30.0f * sc;
+            for (int t = 0; t < kThemeCount; ++t) {
+                if (t % cols) ImGui::SameLine(0, gap);
+                ImGui::PushID(t);
+                const ImVec2 pos = ImGui::GetCursorScreenPos();
+                if (ImGui::InvisibleButton("##theme", ImVec2(tw, th))) {
+                    s.ui.theme = t;
+                    setDpiScale(dpi_);
+                }
+                const bool hov = ImGui::IsItemHovered();
+                if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                ImGui::PopID();
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                const float r = 10.0f * sc;
+                auto preview = [&](const ThemeColors& c, ImVec2 a, ImVec2 b) {
+                    dl->AddRectFilled(a, b, hex(c.background), r);
+                    const ImVec2 ca(a.x + 10.0f * sc, a.y + 10.0f * sc), cb(b.x - 10.0f * sc, b.y - 8.0f * sc);
+                    if (cb.x > ca.x + 8.0f * sc) {
+                        dl->AddRectFilled(ca, cb, hex(c.surface), 6.0f * sc);
+                        const float w = cb.x - ca.x;
+                        dl->AddRectFilled(ImVec2(ca.x + 8.0f * sc, ca.y + 9.0f * sc), ImVec2(ca.x + w * 0.62f, ca.y + 14.0f * sc),
+                                          hex(c.text), 2.0f * sc);
+                        dl->AddRectFilled(ImVec2(ca.x + 8.0f * sc, ca.y + 20.0f * sc), ImVec2(ca.x + w * 0.42f, ca.y + 24.0f * sc),
+                                          withAlpha(hex(c.text), 0.45f), 2.0f * sc);
+                    }
+                };
+                const ImVec2 pa = pos, pb(pos.x + tw, pos.y + ph);
+                if (t == kThemeSystem) {
+                    // Half light, half dark.
+                    dl->PushClipRect(pa, ImVec2(pa.x + tw * 0.5f, pb.y), true);
+                    preview(themeColors(kThemeLight, mine), pa, pb);
+                    dl->PopClipRect();
+                    dl->PushClipRect(ImVec2(pa.x + tw * 0.5f, pa.y), pb, true);
+                    preview(themeColors(kThemeDark, mine), pa, pb);
+                    dl->PopClipRect();
+                } else {
+                    preview(themeColors(t, mine), pa, pb);
+                }
+                dl->AddCircleFilled(ImVec2(pb.x - 22.0f * sc, pb.y - 18.0f * sc), 6.0f * sc, p.accent, 16);
+                const bool on = s.ui.theme == t;
+                dl->AddRect(pa, pb, on ? p.accent : hov ? p.border : p.lineSoft, r, (on ? 2.5f : 1.5f) * sc);
+                ImGui::PushFont(on ? fonts().semibold : fonts().regular, 13.0f);
+                dl->AddText(ImVec2(pa.x + 2.0f * sc, pb.y + 6.0f * sc), on ? p.text : p.text2, themeName(t));
+                ImGui::PopFont();
+            }
         }
-        pop::Hint("Match Windows follows Settings > Personalization > Colors > app mode.");
+        if (s.ui.theme == kThemeSystem) pop::Hint("Follows Windows: Settings > Personalization > Colors > app mode.");
+        if (s.ui.theme == kThemeCustom) {
+            // The user's own theme: three colours, the rest follows from them.
+            ImGui::Dummy(ImVec2(0, 4.0f * sc));
+            pop::Label("Your colours");
+            auto colorRow = [&](const char* label, uint32_t* rgb) {
+                float c[3] = {((*rgb >> 16) & 0xFF) / 255.0f, ((*rgb >> 8) & 0xFF) / 255.0f, (*rgb & 0xFF) / 255.0f};
+                ImGui::SetNextItemWidth(220.0f * sc);
+                if (ImGui::ColorEdit3(label, c, ImGuiColorEditFlags_DisplayHex | ImGuiColorEditFlags_NoOptions)) {
+                    auto b = [](float v) { return static_cast<uint32_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
+                    *rgb = (b(c[0]) << 16) | (b(c[1]) << 8) | b(c[2]);
+                    setDpiScale(dpi_);
+                }
+                if (ImGui::IsItemDeactivatedAfterEdit()) mc_->markDirty();
+            };
+            colorRow("Background", &s.ui.customBackground);
+            colorRow("Cards", &s.ui.customSurface);
+            colorRow("Text", &s.ui.customText);
+            if (contrastRatio(s.ui.customText, s.ui.customSurface) < 4.5f)
+                pop::TextColoredWrapped(p.warn, "The text may be hard to read on these cards; try a lighter or darker text colour.");
+            if (pop::SmallButton("Start from a theme...")) ImGui::OpenPopup("##startfrom");
+            if (ImGui::BeginPopup("##startfrom")) {
+                for (int t = 0; t < kThemeCount; ++t) {
+                    if (t == kThemeCustom || t == kThemeSystem) continue;
+                    if (ImGui::Selectable(themeName(t))) {
+                        const ThemeColors c = themeColors(t, ThemeColors{});
+                        s.ui.customBackground = c.background;
+                        s.ui.customSurface = c.surface;
+                        s.ui.customText = c.text;
+                        setDpiScale(dpi_);
+                        mc_->markDirty();
+                    }
+                }
+                ImGui::EndPopup();
+            }
+        }
         pop::Divider();
         pop::Label("Accent colour");
-        for (int i = 0; i < 4; ++i) {
-            if (i) ImGui::SameLine(0, 14.0f * sc);
-            const float d = 36.0f * sc;
-            const ImVec2 pos = ImGui::GetCursorScreenPos();
-            ImGui::PushID(i);
-            if (ImGui::InvisibleButton("##accent", ImVec2(d + 8.0f * sc, d + 8.0f * sc))) {
-                s.ui.accent = kAccentNames[i];
-                setDpiScale(dpi_);
+        {
+            const float d = 34.0f * sc;
+            for (int i = 0; i <= kAccentCount; ++i) {
+                const bool custom = i == kAccentCount;
+                const char* name = custom ? "custom" : kAccentNames[i];
+                if (i) ImGui::SameLine(0, 10.0f * sc);
+                const ImVec2 pos = ImGui::GetCursorScreenPos();
+                ImGui::PushID(i);
+                if (ImGui::InvisibleButton("##accent", ImVec2(d + 8.0f * sc, d + 8.0f * sc))) {
+                    s.ui.accent = name;
+                    setDpiScale(dpi_);
+                    if (custom) ImGui::OpenPopup("##customaccent");
+                }
+                Tip(custom ? "Your own colour" : kAccentLabels[i]);
+                if (custom && ImGui::BeginPopup("##customaccent")) {
+                    float c[3] = {((s.ui.customAccent >> 16) & 0xFF) / 255.0f, ((s.ui.customAccent >> 8) & 0xFF) / 255.0f,
+                                  (s.ui.customAccent & 0xFF) / 255.0f};
+                    if (ImGui::ColorPicker3("##picker", c, ImGuiColorEditFlags_DisplayHex | ImGuiColorEditFlags_NoSidePreview)) {
+                        auto b = [](float v) { return static_cast<uint32_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
+                        s.ui.customAccent = (b(c[0]) << 16) | (b(c[1]) << 8) | b(c[2]);
+                        setDpiScale(dpi_);
+                    }
+                    if (ImGui::IsItemDeactivatedAfterEdit()) mc_->markDirty();
+                    ImGui::EndPopup();
+                }
+                ImGui::PopID();
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                const ImVec2 c(pos.x + d * 0.5f + 4.0f * sc, pos.y + d * 0.5f + 4.0f * sc);
+                if (s.ui.accent == name) dl->AddCircle(c, d * 0.5f + 4.0f * sc, p.outline, 32, 2.0f * sc);
+                if (custom) {
+                    // A colour wheel, filled with the chosen colour in the middle.
+                    for (int k = 0; k < 12; ++k) {
+                        const float a0 = k * 6.2831853f / 12.0f, a1 = (k + 1) * 6.2831853f / 12.0f;
+                        float rr, gg, bb;
+                        ImGui::ColorConvertHSVtoRGB(k / 12.0f, 0.75f, 0.95f, rr, gg, bb);
+                        dl->PathArcTo(c, d * 0.5f, a0, a1, 6);
+                        dl->PathLineTo(c);
+                        dl->PathFillConvex(ImGui::ColorConvertFloat4ToU32(ImVec4(rr, gg, bb, 1.0f)));
+                    }
+                    dl->AddCircleFilled(c, d * 0.27f, accentColor("custom", s.ui.customAccent), 24);
+                } else {
+                    dl->AddCircleFilled(c, d * 0.5f, accentColor(name), 32);
+                }
+                dl->AddCircle(c, d * 0.5f, p.outline, 32, 1.5f * sc);
             }
-            Tip(kAccentLabels[i]);
-            ImGui::PopID();
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            const ImVec2 c(pos.x + d * 0.5f + 4.0f * sc, pos.y + d * 0.5f + 4.0f * sc);
-            if (s.ui.accent == kAccentNames[i]) dl->AddCircle(c, d * 0.5f + 4.0f * sc, p.outline, 32, 2.0f * sc);
-            dl->AddCircleFilled(c, d * 0.5f, accentColor(kAccentNames[i]), 32);
-            dl->AddCircle(c, d * 0.5f, p.outline, 32, 1.5f * sc);
         }
         pop::Divider();
         float scale = s.ui.uiScale * 100.0f;
@@ -305,23 +414,54 @@ void EchoApp::drawSettings() {
             }
         }
         Tip("Reads session-import.json from the settings folder.");
-        ImGui::SameLine();
-        if (pop::SmallButton("Reset to defaults...", pop::Btn::Danger)) ImGui::OpenPopup("##reset");
-        if (ImGui::BeginPopupModal("##reset", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
-            pop::CardTitle("Reset everything to the defaults?");
-            pop::Caption("Inputs, outputs, routing and effects go back to the defaults. Your presets, recordings and models are kept.");
-            if (pop::Button("Reset", pop::Btn::Primary)) {
-                mc_->createDefaultSession();
-                mc_->session().firstRunCompleted = true;
-                pendingEngineInit_ = false;
-                toast("Settings reset to the defaults", 1);
+        pop::EndCard();
+
+        ImGui::Dummy(ImVec2(0, 4.0f * sc));
+        pop::BeginCard("##resetcard");
+        pop::CardTitle("Reset to defaults");
+        pop::Caption("Put Echo's settings back the way they were when you installed it. You choose what to reset; your "
+                     "presets, recordings, AI models and sound files are always kept.");
+        if (pop::Button("Reset settings...", pop::Btn::Danger)) openResetPopup_ = true;
+        pop::EndCard();
+
+        // The confirmation, with what to reset (everything ticked).
+        static ResetParts parts;
+        if (openResetPopup_) {
+            parts = ResetParts{};
+            ImGui::OpenPopup("Reset settings");
+            openResetPopup_ = false;
+        }
+        ImGui::SetNextWindowSize(ImVec2(600.0f * sc, 0.0f));
+        if (ImGui::BeginPopupModal("Reset settings", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
+            pop::CardTitle("Reset settings to the defaults?");
+            pop::Caption("Choose what goes back to how it was when Echo was installed.");
+            ImGui::Dummy(ImVec2(0, 4.0f * sc));
+            const float w = ImGui::GetContentRegionAvail().x;
+            pop::CheckRow("##rmixer", "Inputs, outputs and routing",
+                          "Your inputs and outputs as at the start; voices and effects removed",
+                          &parts.mixer, w);
+            pop::CheckRow("##rkeys", "Hotkeys", "Push to talk, the mute key and voice hotkeys are cleared", &parts.hotkeys, w);
+            pop::CheckRow("##rboard", "Soundboard", "Echo's built-in sounds, no keys (sounds you added stay in the folder)",
+                          &parts.soundboard, w);
+            pop::CheckRow("##raudio", "Audio quality and recording", "Sample rate, buffer size, quality, recording folder and format",
+                          &parts.audio, w);
+            pop::CheckRow("##rlook", "Look and behaviour",
+                          "Theme, colour, size, tooltips, running when closed, starting with Windows",
+                          &parts.look, w);
+            pop::Hint("Always kept: your presets, recordings, AI models and sound files. This can't be undone; use Export "
+                      "settings first if you might want them back.");
+            ImGui::Dummy(ImVec2(0, 4.0f * sc));
+            ImGui::BeginDisabled(!parts.any());
+            if (pop::Button("Reset", pop::Btn::Danger)) {
+                if (parts.look) setStartup(false);
+                resetToDefaults(parts);
                 ImGui::CloseCurrentPopup();
             }
+            ImGui::EndDisabled();
             ImGui::SameLine();
             if (pop::Button("Cancel")) ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
         }
-        pop::EndCard();
         break;
     }
     case SettingsTab::Privacy: {
@@ -332,9 +472,10 @@ void EchoApp::drawSettings() {
         pop::CardTitle("Everything stays on this PC");
         ImGui::Dummy(ImVec2(0, 2.0f * sc));
         ImGui::BulletText("No accounts, subscriptions, ads or telemetry.");
-        ImGui::BulletText("Echo makes no network connections. Audio is processed only on this computer.");
+        ImGui::BulletText("Audio is processed only on this computer, and nothing is uploaded.");
+        ImGui::BulletText("Echo goes online only when you click Download ContentVec (AI voices) or Install VB-CABLE.");
         ImGui::BulletText("Nothing is recorded unless you press Record.");
-        ImGui::BulletText("AI voice uses ONNX Runtime only if you install it, with models you add yourself.");
+        ImGui::BulletText("AI voices use ONNX Runtime only if you install it, with voices you add yourself.");
         ImGui::BulletText("Logs are plain text files in your app data folder, for fixing problems.");
         pop::EndCard();
         break;

@@ -2,23 +2,19 @@
 
 #include <filesystem>
 
+#include "ai/RvcVoice.h"
 #include "core/Log.h"
 #include "core/Text.h"
 #include "session/Serialization.h"
 
 namespace echo::ai {
 
-namespace {
-// First member of OrtDmlApi (dml_provider_factory.h); only this entry is used.
-struct OrtDmlApiPrefix {
-    OrtStatus*(ORT_API_CALL* SessionOptionsAppendExecutionProvider_DML)(OrtSessionOptions* options, int device_id);
-};
-} // namespace
-
 bool loadManifest(const std::wstring& dir, ModelManifest& m) {
     namespace fs = std::filesystem;
     m.dir = dir;
     m.id = wideToUtf8(fs::path(dir).filename().wstring());
+    std::error_code ec0;
+    if (!fs::exists(fs::path(dir) / L"model.json", ec0)) return loadRvcManifest(dir, m); // an RVC voice folder
     json j;
     std::string err;
     if (!loadJsonFile((fs::path(dir) / L"model.json").wstring(), j, &err, false)) {
@@ -93,19 +89,8 @@ bool OnnxVoiceModel::load(const ModelManifest& m, bool preferGpu, std::string* e
     api->SetIntraOpNumThreads(opts_, 2); // leave CPU for the audio engine
     provider_ = "CPU";
     if (preferGpu) {
-        bool hasDml = false;
-        for (const auto& p : rt.providers()) hasDml |= p == "DmlExecutionProvider";
-        if (hasDml) {
-            const void* dmlApi = nullptr;
-            if (!api->GetExecutionProviderApi("DML", ORT_API_VERSION, &dmlApi) && dmlApi) {
-                api->DisableMemPattern(opts_);
-                api->SetSessionExecutionMode(opts_, ORT_SEQUENTIAL);
-                auto* dml = static_cast<const OrtDmlApiPrefix*>(dmlApi);
-                std::string e;
-                if (rt.check(dml->SessionOptionsAppendExecutionProvider_DML(opts_, 0), &e)) provider_ = "DirectML (GPU)";
-                else ECHO_LOG_WARN("DirectML unavailable, using CPU: %s", e.c_str());
-            }
-        }
+        const std::string gpu = rt.addGpu(opts_);
+        if (!gpu.empty()) provider_ = gpu;
     }
     if (!rt.check(api->CreateSession(rt.env(), m.onnxPath.c_str(), opts_, &session_), error)) return false;
     if (!rt.check(api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &mem_), error)) return false;

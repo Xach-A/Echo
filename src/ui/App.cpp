@@ -1,16 +1,20 @@
 #include "ui/App.h"
 
 #include <windows.h>
+#include <commdlg.h>
 #include <shellapi.h>
 #include <dwmapi.h>
 
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <filesystem>
 
 #include "Version.h"
+#include "audio/AudioDecoder.h"
 #include "core/Log.h"
+#include "core/WavFile.h"
 #include "core/Text.h"
 #include "dsp/EffectRegistry.h"
 #include "dsp/NoiseSuppressorInfo.h"
@@ -25,8 +29,19 @@
 
 namespace echo::ui {
 
+namespace {
+// Hotkey action ids (see pollHotkeys).
+constexpr int kVoiceActionBase = 1000; // + voice hotkey index
+constexpr int kStopAllAction = 1999;   // soundboard: stop every sound
+constexpr int kPadActionBase = 2000;   // + soundboard pad slot
+constexpr int kMaxPads = SoundboardSource::kMaxPads;
+} // namespace
+
 EchoApp::EchoApp() = default;
-EchoApp::~EchoApp() = default;
+EchoApp::~EchoApp() {
+    contentVecProgress_.cancel = true; // a download in progress stops (the future waits for it)
+    vbCableProgress_.cancel = true;
+}
 
 bool EchoApp::init(HWND hwnd, ID3D11Device* device, bool safeMode, std::string* error) {
     hwnd_ = hwnd;
@@ -93,7 +108,32 @@ bool EchoApp::init(HWND hwnd, ID3D11Device* device, bool safeMode, std::string* 
     appliedHotkeys_ = mc_->session().hotkeys;
     hotkeysApplied_ = true;
     Engine* engine = &mc_->engine();
-    hotkeys_->start([engine](bool open) { engine->setMicGate(open); });
+    SoundboardSource* board = &mc_->soundboard();
+    auto* modes = &padModes_;
+    hotkeys_->start([engine](bool open) { engine->setMicGate(open); },
+                    [board, modes](int id, bool down) {
+                        // Soundboard keys play right here on the hotkey thread,
+                        // without waiting for the next UI frame.
+                        if (id == kStopAllAction) {
+                            if (down) board->stopAll();
+                            return;
+                        }
+                        const int slot = id - kPadActionBase;
+                        if (slot < 0 || slot >= kMaxPads) return;
+                        switch (static_cast<PadMode>((*modes)[static_cast<size_t>(slot)].load(std::memory_order_relaxed))) {
+                        case PadMode::Toggle:
+                            if (down) board->toggle(slot);
+                            break;
+                        case PadMode::Hold:
+                            if (down) board->play(slot);
+                            else board->stop(slot);
+                            break;
+                        default:
+                            if (down) board->play(slot);
+                            break;
+                        }
+                    });
+    rebuildSoundBank(true);
     if (!mc_->session().firstRunCompleted) openWizard();
     setTooltipsEnabled(mc_->session().ui.showTooltips);
     return true;
@@ -101,6 +141,12 @@ bool EchoApp::init(HWND hwnd, ID3D11Device* device, bool safeMode, std::string* 
 
 void EchoApp::shutdown() {
     if (hotkeys_) hotkeys_->stop();
+    // Voice changes still fading out: finish them so the session is saved
+    // without the old effects (twice: a change may add voices afterwards).
+    for (int pass = 0; pass < 2; ++pass) {
+        for (auto& pv : pendingVoices_) pv.at = 0.0;
+        applyPendingVoices();
+    }
     saveNow();
     if (mc_) mc_->stop();
     textures_.clear();
@@ -128,8 +174,15 @@ void EchoApp::autosave(double now) {
 
 void EchoApp::setDpiScale(float s) {
     dpi_ = s;
-    applyTheme(mc_ ? mc_->session().ui.theme : 0, dpi_, mc_ ? mc_->session().ui.uiScale : 1.0f,
-               mc_ ? mc_->session().ui.accent : std::string("blue"));
+    ThemeChoice c;
+    if (mc_) {
+        const UiSettings& ui = mc_->session().ui;
+        c.theme = ui.theme;
+        c.accent = ui.accent;
+        c.customAccent = ui.customAccent;
+        c.custom = {ui.customBackground, ui.customSurface, ui.customText};
+    }
+    applyTheme(c, dpi_, mc_ ? mc_->session().ui.uiScale : 1.0f);
     if (hwnd_) {
         BOOL dark = themeIsDark() ? TRUE : FALSE;
         DwmSetWindowAttribute(hwnd_, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
@@ -137,7 +190,38 @@ void EchoApp::setDpiScale(float s) {
 }
 
 void EchoApp::onSystemThemeChanged() {
-    if (mc_ && mc_->session().ui.theme == 3) setDpiScale(dpi_);
+    if (mc_ && mc_->session().ui.theme == kThemeSystem) setDpiScale(dpi_);
+}
+
+void EchoApp::resetToDefaults(const ResetParts& parts) {
+    if (!parts.any()) return;
+    if (hotkeys_) hotkeys_->cancelCapture();
+    // Voice changes in flight refer to effects that are about to go.
+    pendingVoices_.clear();
+    holdAdded_.clear();
+    mc_->resetSettings(parts);
+    if (parts.mixer) {
+        voiceTarget_ = 0;
+        hasSelection_ = false;
+        effectsOpen_ = false;
+        voiceMix_ = false;
+        stripMeters_.clear();
+        busMeters_.clear();
+    }
+    if (parts.audio) {
+        if (mc_->session().recorder.folder.empty())
+            mc_->session().recorder.folder = wideToUtf8(paths::defaultRecordingsDir());
+        pendingEngineInit_ = false;
+    }
+    if (parts.look) {
+        setDpiScale(dpi_);
+        setTooltipsEnabled(mc_->session().ui.showTooltips);
+    }
+    if (parts.soundboard) soundBankSignature_.clear(); // rebuilt on the next frame
+    saveNow();
+    ECHO_LOG_INFO("Settings reset to defaults (mixer %d, hotkeys %d, soundboard %d, audio %d, look %d)", parts.mixer,
+                  parts.hotkeys, parts.soundboard, parts.audio, parts.look);
+    toast("Settings reset to the defaults", 1);
 }
 
 void EchoApp::toggleMicrophoneMute() {
@@ -157,7 +241,33 @@ void EchoApp::pollHotkeys() {
         appliedHotkeys_ = h;
         hotkeysApplied_ = true;
     }
+    // Voice and soundboard keys.
+    std::vector<win::HotkeyService::Action> actions;
+    for (size_t i = 0; i < h.voiceKeys.size(); ++i)
+        if (!h.voiceKeys[i].key.empty()) actions.push_back({kVoiceActionBase + static_cast<int>(i), h.voiceKeys[i].key});
+    const SoundboardSettings& sb = mc_->session().soundboard;
+    if (!sb.stopAllKey.empty()) actions.push_back({kStopAllAction, sb.stopAllKey});
+    for (size_t i = 0; i < sb.pads.size() && i < static_cast<size_t>(kMaxPads); ++i)
+        if (!sb.pads[i].key.empty()) actions.push_back({kPadActionBase + static_cast<int>(i), sb.pads[i].key});
+    const bool same = actions.size() == appliedActions_.size() &&
+                      std::equal(actions.begin(), actions.end(), appliedActions_.begin(),
+                                 [](const auto& a, const auto& b) { return a.id == b.id && a.key == b.key; });
+    if (!same) {
+        hotkeys_->setActions(actions);
+        appliedActions_ = std::move(actions);
+        holdAdded_.clear();
+    }
     for (int n = hotkeys_->takeMuteToggles(); n > 0; --n) toggleMicrophoneMute();
+    for (const auto& ev : hotkeys_->takeEvents()) {
+        // Soundboard keys were already played on the hotkey thread.
+        const int i = ev.id - kVoiceActionBase;
+        if (i < 0 || i >= static_cast<int>(h.voiceKeys.size())) continue;
+        StripModel* mic = primaryMic();
+        if (!mic) continue;
+        const VoiceHotkey vh = h.voiceKeys[static_cast<size_t>(i)];
+        std::vector<std::string> target = voiceHotkeyResult(vh, ev.down, mic->voices, holdAdded_[static_cast<size_t>(i)]);
+        if (target != mic->voices) setVoices(*mic, std::move(target), vh.mode == VoiceKeyMode::Switch);
+    }
 }
 
 void EchoApp::toast(const std::string& text, int level) {
@@ -196,12 +306,104 @@ void EchoApp::startCableTest(const std::string& renderId, const std::string& cap
     });
 }
 
+std::set<const Effect*> EchoApp::fadingEffects(uint32_t strip) const {
+    std::set<const Effect*> out;
+    for (const auto& pv : pendingVoices_)
+        if (pv.strip == strip)
+            for (const auto& e : pv.remove) out.insert(e.get());
+    return out;
+}
+
+bool EchoApp::setVoices(StripModel& s, std::vector<std::string> voices, bool exclusive, bool announce) {
+    const ChainTarget t{false, s.id};
+    const PresetFinder find = [this](const std::string& n) { return presets_.find(n); };
+    // A newer choice replaces one still waiting for old effects to fade out.
+    for (auto& pv : pendingVoices_)
+        if (pv.strip == s.id) pv.replan = false;
+    VoicePlan plan = planVoices(s.chain, voices, exclusive, find, fadingEffects(s.id));
+    if (!plan.error.empty()) {
+        toast(plan.error, 2);
+        return false;
+    }
+    // Effects brought back while fading out are no longer removed.
+    for (auto& pv : pendingVoices_)
+        for (const auto& e : plan.revived) pv.remove.erase(std::remove(pv.remove.begin(), pv.remove.end(), e), pv.remove.end());
+    auto without = [](const std::vector<std::shared_ptr<Effect>>& chain, const std::vector<std::shared_ptr<Effect>>& gone) {
+        std::vector<std::shared_ptr<Effect>> out;
+        for (const auto& e : chain)
+            if (std::find(gone.begin(), gone.end(), e) == gone.end()) out.push_back(e);
+        return out;
+    };
+    if (!mc_->running()) {
+        // Nothing is playing: no fades needed.
+        for (const auto& e : plan.revived) e->bypass = false;
+        std::vector<std::shared_ptr<Effect>> chain = without(plan.chain, plan.fading);
+        if (plan.deferred) {
+            VoicePlan again = planVoices(chain, plan.voices, exclusive, find, {});
+            if (!again.error.empty() || again.deferred) {
+                toast(again.error.empty() ? "That's too many effects for one input." : again.error, 2);
+                return false;
+            }
+            chain = without(again.chain, again.fading);
+        }
+        mc_->setChain(t, std::move(chain));
+    } else {
+        applyVoicePlan(plan, s.chain);
+        mc_->setChain(t, plan.chain);
+        if (!plan.fading.empty() || plan.deferred) {
+            const std::set<const Effect*> already = fadingEffects(s.id);
+            std::vector<std::shared_ptr<Effect>> fresh;
+            for (const auto& e : plan.fading)
+                if (!already.count(e.get())) fresh.push_back(e);
+            pendingVoices_.push_back(PendingVoices{s.id, now_ + 0.035, std::move(fresh), plan.deferred, plan.voices});
+        }
+    }
+    // A strip pointer may have moved if the session's strips changed; find it again.
+    if (StripModel* st = mc_->session().strip(t.id)) st->voices = plan.voices;
+    if (announce) toast(plan.voices.empty() ? std::string("Original voice") : "Voice: " + voicesLabel(plan.voices), 1);
+    return true;
+}
+
+void EchoApp::applyPendingVoices() {
+    if (pendingVoices_.empty()) return;
+    std::vector<PendingVoices> due;
+    for (auto it = pendingVoices_.begin(); it != pendingVoices_.end();) {
+        if (now_ >= it->at) {
+            due.push_back(std::move(*it));
+            it = pendingVoices_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto& pv : due) {
+        StripModel* s = mc_->session().strip(pv.strip);
+        if (!s) continue;
+        std::vector<std::shared_ptr<Effect>> chain;
+        for (const auto& e : s->chain)
+            if (std::find(pv.remove.begin(), pv.remove.end(), e) == pv.remove.end()) chain.push_back(e);
+        if (chain.size() != s->chain.size()) mc_->setChain(ChainTarget{false, s->id}, std::move(chain));
+        if (pv.replan)
+            if (StripModel* st = mc_->session().strip(pv.strip)) setVoices(*st, pv.target, true, false);
+    }
+}
+
+void EchoApp::toggleVoice(StripModel& s, const std::string& name) {
+    std::vector<std::string> target = s.voices;
+    auto it = std::find(target.begin(), target.end(), name);
+    if (it != target.end()) target.erase(it);
+    else target.push_back(name);
+    setVoices(s, std::move(target), false);
+}
+
 void EchoApp::applyChainPreset(const ChainTarget& t, const ChainPreset& p) {
+    if (!t.bus && presets_.find(p.name)) {
+        // On an input a preset is a voice: it replaces the current ones.
+        if (StripModel* st = mc_->session().strip(t.id)) setVoices(*st, {p.name}, true);
+        return;
+    }
     std::vector<std::string> warnings;
     auto chain = chainFromJson(p.chain, &warnings);
-    mc_->applyPresetChain(t, std::move(chain)); // keeps the input's noise suppression / echo cancellation
-    if (!t.bus)
-        if (StripModel* st = mc_->session().strip(t.id)) st->voice = p.name;
+    mc_->applyPresetChain(t, std::move(chain)); // keeps an input's noise suppression / echo cancellation
     for (const auto& w : warnings) toast(w, 2);
     toast("Loaded preset '" + p.name + "'", 1);
 }
@@ -388,6 +590,9 @@ void EchoApp::frame(double now, double dt) {
     }
 
     if (snapshotIndex_ >= 0) snapshotStep();
+    applyPendingVoices();
+    finishImports();
+    rebuildSoundBank();
     handleFocusRequest();
     drawShell();
     if (effectsOpen_) drawInspector();
@@ -441,23 +646,33 @@ void EchoApp::snapshotStep() {
         {"wizard-3-headphones", 2, Page::Home, SettingsTab::Audio, nullptr, false},
         {"wizard-4-audio", 3, Page::Home, SettingsTab::Audio, nullptr, false},
         {"wizard-5-virtual-mic", 4, Page::Home, SettingsTab::Audio, nullptr, false},
+        {"wizard-5-virtual-mic-install", 4, Page::Home, SettingsTab::Audio, nullptr, false},
         {"wizard-6-test", 5, Page::Home, SettingsTab::Audio, nullptr, false},
-        {"wizard-7-routing", 6, Page::Home, SettingsTab::Audio, nullptr, false},
-        {"wizard-8-use", 7, Page::Home, SettingsTab::Audio, nullptr, false},
+        {"wizard-7-use", 6, Page::Home, SettingsTab::Audio, nullptr, false},
         {"home", -1, Page::Home, SettingsTab::Audio, "Deep Voice", false},
         {"voices", -1, Page::Voices, SettingsTab::Audio, nullptr, false},
         {"voices-autotune", -1, Page::Voices, SettingsTab::Audio, "Hard Autotune", false},
+        {"voices-pain", -1, Page::Voices, SettingsTab::Audio, "Pain", false},
+        {"voices-mix", -1, Page::Voices, SettingsTab::Audio, nullptr, false},
+        {"soundboard", -1, Page::Soundboard, SettingsTab::Audio, nullptr, false},
         {"mixer", -1, Page::Mixer, SettingsTab::Audio, "Deep Voice", false},
         {"mixer-effects", -1, Page::Mixer, SettingsTab::Audio, "Streaming Voice", true},
         {"apps", -1, Page::Apps, SettingsTab::Audio, nullptr, false},
         {"devices", -1, Page::Devices, SettingsTab::Audio, nullptr, false},
+        {"devices-no-cable", -1, Page::Devices, SettingsTab::Audio, nullptr, false},
         {"recorder", -1, Page::Recorder, SettingsTab::Audio, nullptr, false},
         {"settings-audio", -1, Page::Settings, SettingsTab::Audio, nullptr, false},
         {"settings-hotkeys", -1, Page::Settings, SettingsTab::Hotkeys, nullptr, false},
         {"settings-appearance", -1, Page::Settings, SettingsTab::Appearance, nullptr, false},
         {"settings-startup", -1, Page::Settings, SettingsTab::Startup, nullptr, false},
+        {"settings-reset", -1, Page::Settings, SettingsTab::Startup, nullptr, false},
         {"settings-diagnostics", -1, Page::Settings, SettingsTab::Diagnostics, nullptr, false},
         {"home-dark", -1, Page::Home, SettingsTab::Audio, "Deep Voice", false},
+        {"voices-ai", -1, Page::Voices, SettingsTab::Audio, nullptr, false},
+        {"theme-midnight", -1, Page::Voices, SettingsTab::Audio, "Deep Voice", false},
+        {"theme-rose", -1, Page::Home, SettingsTab::Audio, "Deep Voice", false},
+        {"theme-contrast", -1, Page::Soundboard, SettingsTab::Audio, nullptr, false},
+        {"theme-custom", -1, Page::Settings, SettingsTab::Appearance, nullptr, false},
     };
     constexpr int kCount = static_cast<int>(std::size(steps));
     if (snapshotIndex_ >= kCount) {
@@ -474,9 +689,16 @@ void EchoApp::snapshotStep() {
         }
         page_ = st.page;
         settingsTab_ = st.tab;
+        snapshotNoCable_ = std::strcmp(st.file, "wizard-5-virtual-mic-install") == 0 || std::strcmp(st.file, "devices-no-cable") == 0;
         StripModel* mic = primaryMic();
         if (st.preset && mic) {
             if (const ChainPreset* p = presets_.find(st.preset)) applyVoice(*mic, p);
+        }
+        if (std::strcmp(st.file, "voices-mix") == 0 && mic) {
+            voiceMix_ = true;
+            setVoices(*mic, {"Deep Voice", "Cave Echo"}, true);
+        } else if (std::strcmp(st.file, "voices-mix") != 0) {
+            voiceMix_ = false;
         }
         effectsOpen_ = st.effects && mic;
         if (mic) select(ChainTarget{false, mic->id});
@@ -486,11 +708,44 @@ void EchoApp::snapshotStep() {
             h.talkMode = TalkMode::PushToTalk;
             h.talkKey = {vk::XButton2, 0};
             h.muteKey = {'M', KeyModCtrl | KeyModShift};
+            if (h.voiceKeys.empty()) {
+                h.voiceKeys.push_back(VoiceHotkey{{0x74 /*F5*/, 0}, VoiceKeyMode::Toggle, {"Pain"}});
+                h.voiceKeys.push_back(VoiceHotkey{{vk::XButton1, 0}, VoiceKeyMode::Hold, {"Deep Voice", "Cave Echo"}});
+            }
         }
+        if (std::strcmp(st.file, "soundboard") == 0) {
+            SoundboardSettings& sb = mc_->session().soundboard;
+            if (sb.pads.size() > 2) {
+                sb.pads[0].key = {0x61 /*Num 1*/, 0};
+                sb.pads[1].key = {0x62 /*Num 2*/, 0};
+                sb.pads[2].mode = PadMode::Hold;
+            }
+            mc_->soundboard().play(1);
+        }
+        if (std::strcmp(st.file, "settings-reset") == 0) openResetPopup_ = true;
+        snapshotShowAi_ = std::strcmp(st.file, "voices-ai") == 0;
         if (std::strcmp(st.file, "home-dark") == 0) {
             mc_->session().ui.theme = 1;
             setDpiScale(dpi_);
         }
+        // Ready-made and custom themes, with other accent colours.
+        struct ThemeShot {
+            const char* file;
+            int theme;
+            const char* accent;
+        };
+        for (const ThemeShot& t : {ThemeShot{"theme-midnight", kThemeMidnight, "teal"}, ThemeShot{"theme-rose", kThemeRose, "pink"},
+                                   ThemeShot{"theme-contrast", kThemeContrast, "yellow"}, ThemeShot{"theme-custom", kThemeCustom, "custom"}})
+            if (std::strcmp(st.file, t.file) == 0) {
+                UiSettings& ui = mc_->session().ui;
+                ui.theme = t.theme;
+                ui.accent = t.accent;
+                ui.customAccent = 0x7C3AED;
+                ui.customBackground = 0x1B1530;
+                ui.customSurface = 0x251D40;
+                ui.customText = 0xF1ECFF;
+                setDpiScale(dpi_);
+            }
     }
     if (++snapshotFrame_ == 45) {
         captureRequest_ = snapshotDir_ + L"\\" + std::wstring(st.file, st.file + std::strlen(st.file)) + L".png";
@@ -502,6 +757,9 @@ void EchoApp::snapshotStep() {
 void EchoApp::idle(double now) {
     now_ = now;
     mc_->update(now);
+    applyPendingVoices();
+    finishImports();
+    rebuildSoundBank();
     pollHotkeys();
     for (const auto& n : mc_->takeNotices()) toast(n, 1);
     autosave(now);
@@ -562,35 +820,211 @@ BusModel* EchoApp::firstBus(BusKind kind) {
     return nullptr;
 }
 
-double EchoApp::presetDelayMs(const ChainPreset& p) {
-    const int sr = mc_->engine().sampleRate();
-    if (sr != presetDelayRate_) {
-        presetDelayCache_.clear();
-        presetDelayRate_ = sr;
-    }
-    if (auto it = presetDelayCache_.find(p.name); it != presetDelayCache_.end()) return it->second;
-    // The input's own noise suppression / echo cancellation stays when a voice
-    // is applied, so only the voice's other effects add delay.
-    double samples = 0.0;
-    for (auto& e : chainFromJson(p.chain, nullptr)) {
-        const std::string type = e->typeId();
-        if (type == noiseSuppressorTypeId() || type == echoCancellerTypeId()) continue;
-        e->prepare(sr, mc_->engine().blockSize());
-        samples += e->latencySamples();
-    }
-    const double ms = samples * 1000.0 / sr;
-    presetDelayCache_[p.name] = ms;
-    return ms;
+void EchoApp::applyVoice(StripModel& s, const ChainPreset* p) {
+    setVoices(s, p ? std::vector<std::string>{p->name} : std::vector<std::string>{}, true);
 }
 
-void EchoApp::applyVoice(StripModel& s, const ChainPreset* p) {
-    if (p) {
-        applyChainPreset(ChainTarget{false, s.id}, *p);
+// ---------------------------------------------------------------------------
+// Soundboard
+// ---------------------------------------------------------------------------
+
+void EchoApp::triggerPad(int slot, bool down) {
+    const auto& pads = mc_->session().soundboard.pads;
+    if (slot < 0 || slot >= static_cast<int>(pads.size()) || slot >= kMaxPads) return;
+    SoundboardSource& board = mc_->soundboard();
+    switch (pads[static_cast<size_t>(slot)].mode) {
+    case PadMode::Toggle:
+        if (down) board.toggle(slot);
+        break;
+    case PadMode::Hold:
+        if (down) board.play(slot);
+        else board.stop(slot);
+        break;
+    default:
+        if (down) board.play(slot);
+        break;
+    }
+}
+
+std::string EchoApp::padProblem(const SoundPad& p) const {
+    if (!p.builtin.empty() && !findBuiltinSound(p.builtin)) return "Unknown built-in sound";
+    auto it = clipErrors_.find(p.builtin.empty() ? p.file : "builtin:" + p.builtin);
+    return it != clipErrors_.end() ? it->second : std::string();
+}
+
+void EchoApp::rebuildSoundBank(bool force) {
+    const auto& pads = mc_->session().soundboard.pads;
+    for (size_t i = 0; i < padModes_.size(); ++i)
+        padModes_[i].store(i < pads.size() ? static_cast<int>(pads[i].mode) : 0, std::memory_order_relaxed);
+    const int rate = mc_->engine().sampleRate();
+    std::string sig = std::to_string(rate);
+    for (const auto& p : pads) sig += "|" + p.builtin + ":" + p.file + ":" + std::to_string(p.gainDb);
+    if (!force && sig == soundBankSignature_) return;
+    soundBankSignature_ = sig;
+
+    auto bank = std::make_shared<SoundBank>();
+    std::set<std::string> used;
+    for (size_t i = 0; i < pads.size() && i < static_cast<size_t>(kMaxPads); ++i) {
+        const SoundPad& p = pads[i];
+        const std::string key = (p.builtin.empty() ? "file:" + p.file : "builtin:" + p.builtin) + "@" + std::to_string(rate);
+        used.insert(key);
+        auto it = clipCache_.find(key);
+        if (it == clipCache_.end()) {
+            auto clip = std::make_shared<SoundClip>();
+            if (!p.builtin.empty()) {
+                std::string err;
+                clip->samples = loadBuiltinSound(p.builtin, rate, &err);
+                if (clip->samples.empty()) clipErrors_["builtin:" + p.builtin] = err;
+                else clipErrors_.erase("builtin:" + p.builtin);
+            } else {
+                const std::wstring path = paths::soundsDir() + L"\\" + utf8ToWide(p.file);
+                WavData w;
+                std::error_code ec;
+                if (!std::filesystem::exists(path, ec)) {
+                    clipErrors_[p.file] = "The sound file is missing";
+                } else if (!readWav(path, w, nullptr) || w.channels <= 0 || w.samples.empty()) {
+                    clipErrors_[p.file] = "The sound file can't be read";
+                } else {
+                    clip->samples = stereoAtRate(w, rate);
+                    clipErrors_.erase(p.file);
+                }
+            }
+            std::shared_ptr<const SoundClip> c;
+            if (!clip->samples.empty()) c = clip;
+            it = clipCache_.emplace(key, c).first;
+        }
+        bank->pads.push_back(SoundBank::Pad{it->second, dbToGain(p.gainDb)});
+    }
+    for (auto it = clipCache_.begin(); it != clipCache_.end();) it = used.count(it->first) ? std::next(it) : clipCache_.erase(it);
+    mc_->setSoundBank(bank);
+}
+
+void EchoApp::importSounds() {
+    const auto& pads = mc_->session().soundboard.pads;
+    const size_t room = static_cast<size_t>(kMaxSoundPads) - std::min(static_cast<size_t>(kMaxSoundPads), pads.size() + imports_.size());
+    if (room == 0) {
+        toast("The soundboard is full (" + std::to_string(kMaxSoundPads) + " sounds). Remove one first.", 2);
         return;
     }
-    mc_->applyPresetChain(ChainTarget{false, s.id}, {});
-    s.voice.clear();
-    toast("Original voice", 1);
+    std::vector<wchar_t> buf(65536, L'\0');
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwnd_;
+    ofn.lpstrFilter = win::audioFileFilter();
+    ofn.lpstrFile = buf.data();
+    ofn.nMaxFile = static_cast<DWORD>(buf.size());
+    ofn.lpstrTitle = L"Add sounds to the soundboard";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_ALLOWMULTISELECT | OFN_EXPLORER | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&ofn)) return;
+    // One file: its full path. Several: the folder, then each file name.
+    std::vector<std::wstring> files;
+    const std::wstring first(buf.data());
+    const wchar_t* p = buf.data() + first.size() + 1;
+    if (!*p) files.push_back(first);
+    for (; *p; p += std::wcslen(p) + 1) files.push_back(first + L"\\" + p);
+    if (files.size() > room) {
+        toast("Only " + std::to_string(room) + " more sounds fit on the soundboard.", 2);
+        files.resize(room);
+    }
+    static uint32_t counter = 0;
+    for (const auto& f : files) {
+        auto imp = std::make_unique<Import>();
+        imp->name = wideToUtf8(std::filesystem::path(f).stem().wstring());
+        // Echo keeps its own copy (so the pad works if the original moves).
+        std::string base;
+        for (char c : imp->name)
+            if (std::isalnum(static_cast<unsigned char>(c)) || c == ' ' || c == '-' || c == '_') base += c;
+        if (base.size() > 40) base.resize(40);
+        if (base.empty()) base = "sound";
+        char tag[16];
+        std::snprintf(tag, sizeof(tag), "%08x", static_cast<unsigned>(GetTickCount64() * 2654435761u + ++counter));
+        const std::string fileName = base + "-" + tag + ".wav";
+        const std::wstring dest = paths::soundsDir() + L"\\" + utf8ToWide(fileName);
+        imp->result = std::async(std::launch::async, [f, dest, fileName]() {
+            ImportResult r;
+            win::ComScope com(COINIT_MULTITHREADED);
+            win::DecodedAudio a;
+            std::string err;
+            if (!win::decodeAudioFile(f, kMaxSoundSeconds, a, &err)) {
+                r.error = err;
+                return r;
+            }
+            r.truncated = a.truncated;
+            const size_t frames = a.samples.size() / static_cast<size_t>(a.channels);
+            std::vector<float> stereo(frames * 2);
+            for (size_t i = 0; i < frames; ++i) {
+                const float l = a.samples[i * a.channels];
+                stereo[2 * i] = l;
+                stereo[2 * i + 1] = a.channels > 1 ? a.samples[i * a.channels + 1] : l;
+            }
+            constexpr int kRate = 48000;
+            if (a.sampleRate != kRate) stereo = resampleOffline(stereo, 2, a.sampleRate, kRate);
+            // Never above full scale; short fades so starting or ending it never clicks.
+            float peak = 0.0f;
+            for (float v : stereo) peak = std::max(peak, std::fabs(v));
+            const float g = peak > 0.99f ? 0.99f / peak : 1.0f;
+            const size_t n = stereo.size() / 2, in = kRate / 500, out = kRate / 100;
+            for (size_t i = 0; i < n; ++i) {
+                float e = g;
+                if (i < in) e *= static_cast<float>(i) / in;
+                if (i + out > n) e *= static_cast<float>(n - i) / out;
+                stereo[2 * i] *= e;
+                stereo[2 * i + 1] *= e;
+            }
+            WavWriter w;
+            if (!w.open(dest, kRate, 2, 24) || !w.write(stereo.data(), n)) {
+                r.error = "Could not save the sound in Echo's sounds folder";
+                return r;
+            }
+            w.close();
+            r.file = fileName;
+            return r;
+        });
+        imports_.push_back(std::move(imp));
+    }
+}
+
+void EchoApp::finishImports() {
+    for (auto it = imports_.begin(); it != imports_.end();) {
+        Import& im = **it;
+        if (im.result.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            ++it;
+            continue;
+        }
+        const ImportResult r = im.result.get();
+        if (!r.error.empty()) {
+            toast("Couldn't add '" + im.name + "': " + r.error, 3);
+        } else {
+            SoundboardSettings& sb = mc_->session().soundboard;
+            if (sb.pads.size() < static_cast<size_t>(kMaxSoundPads)) {
+                SoundPad pad;
+                pad.id = sb.nextPadId++;
+                pad.name = im.name;
+                pad.file = r.file;
+                sb.pads.push_back(pad);
+                mc_->markDirty();
+                toast(r.truncated ? "Added '" + im.name + "' (only its first 60 seconds)" : "Added '" + im.name + "'",
+                      r.truncated ? 2 : 1);
+            }
+        }
+        it = imports_.erase(it);
+    }
+}
+
+void EchoApp::removePad(uint32_t padId) {
+    SoundboardSettings& sb = mc_->session().soundboard;
+    auto it = std::find_if(sb.pads.begin(), sb.pads.end(), [&](const SoundPad& p) { return p.id == padId; });
+    if (it == sb.pads.end()) return;
+    const std::string file = it->file;
+    sb.pads.erase(it);
+    // Echo's own copy of the sound goes too (the user's original is untouched).
+    const bool stillUsed = std::any_of(sb.pads.begin(), sb.pads.end(), [&](const SoundPad& p) { return p.file == file; });
+    if (!file.empty() && !stillUsed) {
+        const std::wstring path = paths::soundsDir() + L"\\" + utf8ToWide(file);
+        DeleteFileW(path.c_str());
+        clipErrors_.erase(file);
+    }
+    mc_->markDirty();
 }
 
 void EchoApp::handleFocusRequest() {
@@ -601,6 +1035,8 @@ void EchoApp::handleFocusRequest() {
         effectsOpen_ = hasSelection_;
     } else if (n == "Voice Lab") {
         page_ = Page::Voices;
+    } else if (n == "Soundboard") {
+        page_ = Page::Soundboard;
     } else if (n == "Mixer") {
         page_ = Page::Mixer;
     } else if (n == "Routing") {
@@ -625,7 +1061,7 @@ void EchoApp::drawAbout() {
     ImGui::TextUnformatted(ECHO_APP_NAME " " ECHO_VERSION_STRING);
     ImGui::PopFont();
     pop::Caption("Free, open-source virtual audio mixer and voice changer for Windows. No accounts, no subscriptions, "
-                 "no telemetry, no network access. All audio is processed on this computer.");
+                 "no telemetry. All audio is processed on this computer.");
     pop::Divider();
     pop::Caption("Licensed under the MIT License. Third-party components: Dear ImGui (MIT), nlohmann/json (MIT), RNNoise "
                  "(BSD-3-Clause), doctest (MIT, tests only). Optional: ONNX Runtime (MIT) when you install it. Windows "
@@ -638,7 +1074,11 @@ void EchoApp::drawAbout() {
     ImGui::Dummy(ImVec2(0, 4));
     if (pop::Button("Open documentation")) {
         const std::wstring docs = paths::executableDir() + L"\\docs";
-        ShellExecuteW(nullptr, L"open", docs.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        std::error_code ec;
+        if (!std::filesystem::is_directory(docs, ec))
+            toast("The documentation folder is missing (" + wideToUtf8(docs) + ").", 2);
+        else if (reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", docs.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) <= 32)
+            toast("Couldn't open " + wideToUtf8(docs), 2);
     }
     pop::EndCard();
 }

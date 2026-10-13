@@ -173,6 +173,37 @@ int Resampler::pull(float* out, int frames, double ratio) {
     return avail;
 }
 
+std::vector<float> resampleOffline(const std::vector<float>& in, int channels, double inRate, double outRate) {
+    channels = std::max(1, channels);
+    if (inRate <= 0.0 || outRate <= 0.0 || std::abs(inRate - outRate) < 1e-6) return in;
+    const double ratio = inRate / outRate;
+    const int inFrames = static_cast<int>(in.size() / static_cast<size_t>(channels));
+    const int outFrames = static_cast<int>(std::floor(inFrames / ratio));
+    constexpr int kChunk = 4096;
+    Resampler rs;
+    rs.prepare(channels, ratio, kChunk, ResamplerQuality::High);
+    std::vector<float> out;
+    out.reserve(static_cast<size_t>(outFrames + 16) * channels);
+    std::vector<float> tmp(static_cast<size_t>(kChunk) * 4 * channels);
+    auto drain = [&]() {
+        for (;;) {
+            const int n = rs.pull(tmp.data(), kChunk * 4, ratio);
+            if (n <= 0) break;
+            out.insert(out.end(), tmp.begin(), tmp.begin() + static_cast<long>(n) * channels);
+        }
+    };
+    for (int pos = 0; pos < inFrames;) {
+        const int n = rs.push(in.data() + static_cast<size_t>(pos) * channels, std::min(kChunk, inFrames - pos));
+        pos += n;
+        drain();
+    }
+    // Flush the filter's tail.
+    rs.pushSilence(rs.taps());
+    drain();
+    out.resize(static_cast<size_t>(outFrames) * channels, 0.0f);
+    return out;
+}
+
 // --------------------------------------------------------------------------
 
 void DriftController::prepare(double nominalRatio, double targetFillFrames, double deviceRate,

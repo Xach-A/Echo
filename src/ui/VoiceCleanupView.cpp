@@ -38,9 +38,9 @@ void HoldToCompare(const char* label, Effect& fx, const char* tip) {
 }
 
 void LatencyCpu(const Effect& fx, double sr) {
-    ImGui::TextDisabled("Latency %.0f ms  |  CPU %.1f%% of one core", fx.latencySamples() * 1000.0 / sr,
-                        fx.cpuLoad.load() * 100.0f);
-    Tip("Measured while running. CPU is the share of one processor core this effect uses on this input.");
+    (void)sr;
+    ImGui::TextDisabled("CPU %.1f%% of one core", fx.cpuLoad.load() * 100.0f);
+    Tip("Measured while running: the share of one processor core this effect uses on this input.");
 }
 
 } // namespace

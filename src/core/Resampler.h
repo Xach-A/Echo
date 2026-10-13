@@ -20,6 +20,10 @@ namespace echo {
 
 enum class ResamplerQuality { Low = 0, Normal = 1, High = 2 };
 
+// Converts a whole interleaved recording between sample rates (not real
+// time: for loading sound files).
+std::vector<float> resampleOffline(const std::vector<float>& in, int channels, double inRate, double outRate);
+
 class Resampler {
 public:
     // nominalRatio sets the anti-aliasing cutoff. maxInputChunk bounds a

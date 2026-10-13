@@ -26,6 +26,12 @@ struct ChainPreset {
 
 std::vector<ChainPreset> factoryChainPresets();
 
+// A voice's Intensity control ("ui": "intensity" on a distortion stage in its
+// preset): sets that stage's drive. Below the voice's own drive, the stage's
+// output rises by the preset's "ui_makeup" dB per dB, so less distortion does
+// not make the voice much quieter.
+void applyIntensity(Effect& stage, const json& presetEffect, float drive);
+
 class PresetLibrary {
 public:
     // Loads factory presets plus every *.echopreset in `userDir`.

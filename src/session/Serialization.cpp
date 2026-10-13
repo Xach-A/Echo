@@ -6,6 +6,7 @@
 #include <sstream>
 
 #include "dsp/EffectRegistry.h"
+#include "session/Voices.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -23,6 +24,7 @@ const char* kindToString(SourceKind k) {
     case SourceKind::ProcessLoopback: return "process_loopback";
     case SourceKind::SystemExcludingEcho: return "system_excluding_echo";
     case SourceKind::ToneGenerator: return "tone_generator";
+    case SourceKind::Soundboard: return "soundboard";
     default: return "none";
     }
 }
@@ -33,6 +35,7 @@ SourceKind kindFromString(const std::string& s) {
     if (s == "process_loopback") return SourceKind::ProcessLoopback;
     if (s == "system_excluding_echo") return SourceKind::SystemExcludingEcho;
     if (s == "tone_generator") return SourceKind::ToneGenerator;
+    if (s == "soundboard") return SourceKind::Soundboard;
     return SourceKind::None;
 }
 
@@ -63,6 +66,26 @@ T get(const json& j, const char* key, T def) {
     }
 }
 
+// Colours are saved as "#RRGGBB".
+std::string hexColor(uint32_t rgb) {
+    char buf[8];
+    std::snprintf(buf, sizeof(buf), "#%06X", rgb & 0xFFFFFFu);
+    return buf;
+}
+
+uint32_t colorOf(const json& j, const char* key, uint32_t def) {
+    const std::string s = get<std::string>(j, key, "");
+    if (s.size() != 7 || s[0] != '#') return def;
+    uint32_t v = 0;
+    for (size_t i = 1; i < 7; ++i) {
+        const char c = s[i];
+        const int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (d < 0) return def;
+        v = v * 16 + static_cast<uint32_t>(d);
+    }
+    return v;
+}
+
 } // namespace
 
 json effectToJson(const Effect& e) {
@@ -70,6 +93,7 @@ json effectToJson(const Effect& e) {
     for (int i = 0; i < e.numParams(); ++i) params[e.paramInfo(i).id] = e.param(i);
     json j = {{"type", e.typeId()}, {"bypass", e.bypass.load()}, {"params", params}};
     if (e.label != e.info().name) j["label"] = e.label;
+    if (!e.voice.empty()) j["voice"] = e.voice;
     if (const std::string st = e.saveState(); !st.empty()) j["state"] = st;
     return j;
 }
@@ -83,6 +107,7 @@ std::shared_ptr<Effect> effectFromJson(const json& j, std::vector<std::string>* 
     }
     e->bypass = get<bool>(j, "bypass", false);
     e->label = get<std::string>(j, "label", e->info().name);
+    e->voice = get<std::string>(j, "voice", "");
     if (const std::string st = get<std::string>(j, "state", ""); !st.empty()) e->loadState(st);
     if (auto it = j.find("params"); it != j.end() && it->is_object()) {
         for (auto p = it->begin(); p != it->end(); ++p) {
@@ -132,7 +157,7 @@ json sessionToJson(const Session& s) {
             {"id", st.id},
             {"name", st.name},
             {"color", st.color},
-            {"voice", st.voice},
+            {"voices", st.voices},
             {"group", groupToString(st.group)},
             {"source",
              {{"kind", kindToString(st.source.kind)},
@@ -208,12 +233,36 @@ json sessionToJson(const Session& s) {
                {"showTooltips", s.ui.showTooltips},
                {"compactStrips", s.ui.compactStrips},
                {"accent", s.ui.accent},
+               {"customAccent", hexColor(s.ui.customAccent)},
+               {"customTheme",
+                {{"background", hexColor(s.ui.customBackground)},
+                 {"cards", hexColor(s.ui.customSurface)},
+                 {"text", hexColor(s.ui.customText)}}},
                {"closeToTray", s.ui.closeToTray}};
     auto binding = [](const KeyBinding& b) { return json{{"key", b.key}, {"mods", b.mods}}; };
+    json voiceKeys = json::array();
+    for (const auto& v : s.hotkeys.voiceKeys)
+        voiceKeys.push_back({{"key", binding(v.key)}, {"mode", static_cast<int>(v.mode)}, {"voices", v.voices}});
     j["hotkeys"] = {{"talkMode", static_cast<int>(s.hotkeys.talkMode)},
                     {"talkKey", binding(s.hotkeys.talkKey)},
                     {"muteKey", binding(s.hotkeys.muteKey)},
-                    {"releaseDelayMs", s.hotkeys.releaseDelayMs}};
+                    {"releaseDelayMs", s.hotkeys.releaseDelayMs},
+                    {"voiceKeys", voiceKeys}};
+    json pads = json::array();
+    for (const auto& p : s.soundboard.pads)
+        pads.push_back({{"id", p.id},
+                        {"name", p.name},
+                        {"builtin", p.builtin},
+                        {"file", p.file},
+                        {"key", binding(p.key)},
+                        {"mode", static_cast<int>(p.mode)},
+                        {"gain", p.gainDb},
+                        {"color", p.color}});
+    j["soundboard"] = {{"initialized", s.soundboard.initialized},
+                       {"builtinVersion", s.soundboard.builtinVersion},
+                       {"nextPadId", s.soundboard.nextPadId},
+                       {"stopAllKey", binding(s.soundboard.stopAllKey)},
+                       {"pads", pads}};
     return j;
 }
 
@@ -260,7 +309,14 @@ bool sessionFromJson(const json& j, Session& out, std::vector<std::string>* warn
             StripModel st;
             st.id = get<uint32_t>(sj, "id", s.nextId++);
             st.name = get<std::string>(sj, "name", "Input");
-            st.voice = get<std::string>(sj, "voice", "");
+            std::string legacyVoice;
+            if (auto v = sj.find("voices"); v != sj.end() && v->is_array()) {
+                for (const auto& name : *v)
+                    if (name.is_string() && !name.get<std::string>().empty()) st.voices.push_back(name.get<std::string>());
+            } else {
+                legacyVoice = get<std::string>(sj, "voice", ""); // before voices could be combined
+                if (!legacyVoice.empty()) st.voices.push_back(legacyVoice);
+            }
             st.color = get<uint32_t>(sj, "color", st.color);
             st.group = groupFromString(get<std::string>(sj, "group", "hardware"));
             if (auto src = sj.find("source"); src != sj.end()) {
@@ -298,6 +354,7 @@ bool sessionFromJson(const json& j, Session& out, std::vector<std::string>* warn
                 }
             }
             if (auto c = sj.find("chain"); c != sj.end()) st.chain = chainFromJson(*c, warnings);
+            tagLegacyVoice(st.chain, legacyVoice);
             s.nextId = std::max(s.nextId, st.id + 1);
             s.strips.push_back(std::move(st));
         }
@@ -333,7 +390,7 @@ bool sessionFromJson(const json& j, Session& out, std::vector<std::string>* warn
     }
     if (auto u = j.find("ui"); u != j.end()) {
         if (u->contains("themeMode")) {
-            s.ui.theme = clampv(get<int>(*u, "themeMode", 0), 0, 2);
+            s.ui.theme = clampv(get<int>(*u, "themeMode", 0), 0, kUiThemeCount - 1);
         } else {
             // Before the Friendly Pop redesign: 0 dark (the default), 1
             // midnight, 2 light, 3 match Windows; blue was the default accent.
@@ -351,22 +408,67 @@ bool sessionFromJson(const json& j, Session& out, std::vector<std::string>* warn
         s.ui.compactStrips = get<bool>(*u, "compactStrips", false);
         s.ui.accent = get<std::string>(*u, "accent", "coral");
         if (!u->contains("themeMode") && s.ui.accent == "blue") s.ui.accent = "coral";
+        s.ui.customAccent = colorOf(*u, "customAccent", s.ui.customAccent);
+        if (auto ct = u->find("customTheme"); ct != u->end() && ct->is_object()) {
+            s.ui.customBackground = colorOf(*ct, "background", s.ui.customBackground);
+            s.ui.customSurface = colorOf(*ct, "cards", s.ui.customSurface);
+            s.ui.customText = colorOf(*ct, "text", s.ui.customText);
+        }
         s.ui.closeToTray = get<bool>(*u, "closeToTray", false);
     }
+    auto bindingOf = [&](const json& parent, const char* name) {
+        KeyBinding b;
+        if (auto k = parent.find(name); k != parent.end() && k->is_object()) {
+            b.key = get<int>(*k, "key", 0);
+            b.mods = get<int>(*k, "mods", 0) & (KeyModCtrl | KeyModShift | KeyModAlt | KeyModWin);
+            if (!isBindableKey(b.key)) b = {};
+        }
+        return b;
+    };
     if (auto h = j.find("hotkeys"); h != j.end() && h->is_object()) {
-        auto binding = [&](const char* name) {
-            KeyBinding b;
-            if (auto k = h->find(name); k != h->end() && k->is_object()) {
-                b.key = get<int>(*k, "key", 0);
-                b.mods = get<int>(*k, "mods", 0) & (KeyModCtrl | KeyModShift | KeyModAlt | KeyModWin);
-                if (!isBindableKey(b.key)) b = {};
-            }
-            return b;
-        };
         s.hotkeys.talkMode = static_cast<TalkMode>(clampv(get<int>(*h, "talkMode", 0), 0, 2));
-        s.hotkeys.talkKey = binding("talkKey");
-        s.hotkeys.muteKey = binding("muteKey");
+        s.hotkeys.talkKey = bindingOf(*h, "talkKey");
+        s.hotkeys.muteKey = bindingOf(*h, "muteKey");
         s.hotkeys.releaseDelayMs = clampv(get<int>(*h, "releaseDelayMs", 200), 0, 2000);
+        if (auto vk = h->find("voiceKeys"); vk != h->end() && vk->is_array()) {
+            for (const auto& vj : *vk) {
+                if (!vj.is_object()) continue;
+                VoiceHotkey v;
+                v.key = bindingOf(vj, "key");
+                v.mode = static_cast<VoiceKeyMode>(clampv(get<int>(vj, "mode", 0), 0, kVoiceKeyModes - 1));
+                if (auto names = vj.find("voices"); names != vj.end() && names->is_array())
+                    for (const auto& n : *names)
+                        if (n.is_string() && !n.get<std::string>().empty()) v.voices.push_back(n.get<std::string>());
+                s.hotkeys.voiceKeys.push_back(std::move(v));
+            }
+        }
+    }
+    if (auto sb = j.find("soundboard"); sb != j.end() && sb->is_object()) {
+        s.soundboard.initialized = get<bool>(*sb, "initialized", false);
+        // Boards saved before the version was kept have the first set.
+        s.soundboard.builtinVersion = get<int>(*sb, "builtinVersion", s.soundboard.initialized ? 1 : 0);
+        s.soundboard.nextPadId = std::max<uint32_t>(1, get<uint32_t>(*sb, "nextPadId", 1));
+        s.soundboard.stopAllKey = bindingOf(*sb, "stopAllKey");
+        if (auto pads = sb->find("pads"); pads != sb->end() && pads->is_array()) {
+            for (const auto& pj : *pads) {
+                if (!pj.is_object() || s.soundboard.pads.size() >= static_cast<size_t>(kMaxSoundPads)) continue;
+                SoundPad p;
+                p.id = get<uint32_t>(pj, "id", s.soundboard.nextPadId);
+                p.name = get<std::string>(pj, "name", "Sound");
+                p.builtin = get<std::string>(pj, "builtin", "");
+                p.file = get<std::string>(pj, "file", "");
+                p.key = bindingOf(pj, "key");
+                p.mode = static_cast<PadMode>(clampv(get<int>(pj, "mode", 0), 0, kPadModes - 1));
+                p.gainDb = clampv(get<float>(pj, "gain", 0.0f), -24.0f, 6.0f);
+                p.color = get<uint32_t>(pj, "color", 0);
+                if (p.builtin.empty() && p.file.empty()) continue;
+                bool duplicate = false;
+                for (const auto& o : s.soundboard.pads) duplicate |= o.id == p.id;
+                if (duplicate) p.id = s.soundboard.nextPadId;
+                s.soundboard.nextPadId = std::max(s.soundboard.nextPadId, p.id + 1);
+                s.soundboard.pads.push_back(std::move(p));
+            }
+        }
     }
     out = std::move(s);
     return true;

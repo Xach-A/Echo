@@ -16,7 +16,7 @@
 namespace echo::ui {
 
 namespace {
-const char* const kPageNames[] = {"Home", "Voices", "Mixer", "Apps", "Devices", "Recorder", "Settings"};
+const char* const kPageNames[] = {"Home", "Voices", "Soundboard", "Mixer", "Apps", "Devices", "Recorder", "Settings"};
 } // namespace
 
 void EchoApp::drawShell() {
@@ -52,6 +52,7 @@ void EchoApp::drawShell() {
     switch (page_) {
     case Page::Home: drawHome(); break;
     case Page::Voices: drawVoiceLab(); break;
+    case Page::Soundboard: drawSoundboard(); break;
     case Page::Mixer: drawMixer(); break;
     case Page::Apps: drawApps(); break;
     case Page::Devices: drawDevices(); break;
@@ -132,8 +133,8 @@ void EchoApp::drawHeader() {
         for (int i = 0; i < g->numSources; ++i) drops += g->sources[i]->underruns.load() + g->sources[i]->overruns.load();
         for (int i = 0; i < g->numSinks; ++i) drops += g->sinks[i]->underruns.load() + g->sinks[i]->overruns.load();
     }
-    std::snprintf(engineInfo, sizeof(engineInfo), "%d Hz, %d samples (%.1f ms)\nProcessing load %.1f%%\nDropouts: %llu",
-                  e.sampleRate(), e.blockSize(), e.blockSeconds() * 1000.0, e.stats().cpuLoad.load() * 100.0f,
+    std::snprintf(engineInfo, sizeof(engineInfo), "%d Hz, %s buffer\nProcessing load %.1f%%\nDropouts: %llu", e.sampleRate(),
+                  bufferSizeName(e.blockSize(), e.sampleRate()).c_str(), e.stats().cpuLoad.load() * 100.0f,
                   static_cast<unsigned long long>(drops));
     const HotkeySettings& hk = mc_->session().hotkeys;
     const bool talkMode = hk.talkMode != TalkMode::Off && !hk.talkKey.empty();

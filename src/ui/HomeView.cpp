@@ -32,7 +32,7 @@ std::string voiceLabel(const StripModel& s) {
     bool voiceFx = false;
     for (const auto& e : s.chain) voiceFx |= !isCleanup(*e);
     if (!voiceFx) return "your own voice";
-    return s.voice.empty() ? "your custom effects" : s.voice;
+    return s.voices.empty() ? "your custom effects" : voicesLabel(s.voices);
 }
 
 void EchoApp::drawHome() {
@@ -109,9 +109,8 @@ void EchoApp::drawHome() {
             ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 10.0f * sc);
             ImGui::PushFont(fonts().regular, 13.0f);
             ImGui::TextColored(toVec4(p.text2), hk.talkMode == TalkMode::PushToTalk
-                                                    ? "Push to talk is on: hold the key to talk. Your mic stays on %d ms after you let go."
-                                                    : "Push to mute is on: hold the key to mute.",
-                               hk.releaseDelayMs);
+                                                    ? "Push to talk is on: hold the key to talk. Your mic stays on for a moment after you let go."
+                                                    : "Push to mute is on: hold the key to mute.");
             ImGui::PopFont();
             ImGui::SameLine();
             ImGui::SetCursorScreenPos(ImVec2(bp.x + bw - 70.0f * sc, bp.y + 21.0f * sc));
@@ -133,7 +132,7 @@ void EchoApp::drawHome() {
         ImGui::PopFont();
         ImGui::PopFont();
         if (!capture.empty()) {
-            pop::Caption(("In Discord, Roblox or OBS choose \"" + capture + "\" as the microphone.").c_str());
+            pop::Caption(("Select \"" + capture + "\" as the microphone in your app.").c_str());
         } else {
             pop::Caption("Other apps can't hear Echo yet: set up a virtual mic.");
             if (pop::LinkButton("Set up the virtual mic")) navigate(Page::Devices);
@@ -149,7 +148,7 @@ void EchoApp::drawHome() {
     if (mic) {
         Effect* ns = findType(*mic, noiseSuppressorTypeId());
         bool noise = ns && !ns->bypass.load();
-        if (pop::SwitchRow("Noise removal", "Fans, keyboards, hum · adds 20 ms", &noise)) {
+        if (pop::SwitchRow("Noise removal", "Fans, typing, mouse clicks, hum", &noise)) {
             if (ns) {
                 ns->bypass = !noise;
             } else if (noise) {
@@ -230,14 +229,10 @@ void EchoApp::drawHome() {
     for (size_t i = 0; i < list.size(); ++i) {
         if (i % cols) ImGui::SameLine(0, tgap);
         const ChainPreset* pr = list[i];
-        const bool sel = pr ? (voiceFx && mic->voice == pr->name) : !voiceFx;
-        char delay[32];
-        const double ms = pr ? presetDelayMs(*pr) : 0.0;
-        if (ms < 0.5) std::snprintf(delay, sizeof(delay), "No added delay");
-        else std::snprintf(delay, sizeof(delay), "+%.0f ms", ms);
+        const bool sel = pr ? (voiceFx && mic->voices.size() == 1 && mic->voices[0] == pr->name) : !voiceFx;
         ImGui::PushID(static_cast<int>(i));
-        if (pop::Tile("##tile", presetIcon(pr ? pr->name : ""), pr ? pr->name.c_str() : "Original voice", delay, nullptr, sel,
-                      ImVec2(tw, 100.0f * sc)))
+        if (pop::Tile("##tile", presetIcon(pr ? pr->name : ""), pr ? pr->name.c_str() : "Original voice", nullptr, nullptr, sel,
+                      ImVec2(tw, 84.0f * sc)))
             applyVoice(*mic, pr);
         if (pr) Tip(pr->description.c_str());
         else Tip("Your own voice. Noise removal and echo removal stay as they are.");

@@ -21,7 +21,8 @@ C++" workload (includes CMake and Ninja); run the commands below from a
 Optional:
 
 * Inno Setup 6 for the installer: `winget install --id JRSoftware.InnoSetup --scope user`
-* Python packages `onnx numpy` only to regenerate the AI test model.
+* Python packages `onnx numpy` only to regenerate the AI test model; `torch transformers`
+  and Applio's source to regenerate the RVC test data (`tools/make_rvc_test_data.py`).
 
 ## 2. Build
 
@@ -89,6 +90,16 @@ build/release/bin/echo_hwtest.exe soak 60       # mic + system capture + output 
 build/release/bin/echo_hwtest.exe virtualmic    # Echo -> cable -> recording side, level/gaps/latency
 build/release/bin/echo_hwtest.exe cableraw 30   # same through the cable without Echo (comparison)
 build/release/bin/echo_hwtest.exe denoise 12    # noise suppression on the real mic (memory only)
+build/release/bin/echo_hwtest.exe voice Pain    # a voice preset in real time through the cable (memory only)
+build/release/bin/echo_hwtest.exe soundboard    # built-in sounds through the soundboard input and the cable (memory only; close Echo first)
+build/release/bin/echo_hwtest.exe decode in.mp3 out.wav   # a sound file -> 48 kHz float WAV with Echo's decoder
+build/release/bin/echo_hwtest.exe torch-info voice.pth     # a PyTorch checkpoint's settings and tensors
+build/release/bin/echo_hwtest.exe rvc-convert <voice folder> in.wav out.wav 12 50 1   # an RVC voice in real time (pitch +12, match 50 %, Balanced)
+build/release/bin/echo_hwtest.exe rvc-offline <voice folder> in.wav out.wav 12 50   # the same in one piece
+build/release/bin/echo_hwtest.exe faiss-info voice.index   # loads an RVC index and times retrieval
+build/release/bin/echo_hwtest.exe vbcable-download <folder>   # VB-CABLE's pack: download, checksum, unpack (doesn't install)
+build/release/bin/echo_hwtest.exe dml-probe   # which ONNX operators the graphics card (DirectML build) accepts
+build/release/bin/echo_hwtest.exe rvc-convert <voice folder> in.wav out.wav 0 50 1 1   # the same on the graphics card
 build/release/bin/echo_hwtest.exe perf          # UI-thread device work timing
 ```
 

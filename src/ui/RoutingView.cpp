@@ -126,6 +126,7 @@ void EchoApp::drawFlowDiagram(ImVec2 size) {
         case SourceKind::SystemExcludingEcho: src = "System audio"; break;
         case SourceKind::RenderLoopback: src = st.source.deviceName + " loopback"; break;
         case SourceKind::ToneGenerator: src = "Test signal"; break;
+        case SourceKind::Soundboard: src = "Soundboard"; break;
         default: src = "(none)"; break;
         }
         const auto& m = stripMeters(st.id);

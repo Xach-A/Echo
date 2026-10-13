@@ -2,24 +2,24 @@
 
 #include <windows.h>
 
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 
 namespace echo::ui {
 
 namespace {
 
-struct AccentSet {
-    unsigned color, tint, ink;
-};
+// Accent colours for light and dark themes; tints and text-on-tint colours
+// are mixed from them and the theme's card colour.
 struct Accent {
     const char* name;
-    AccentSet light, dark;
+    unsigned light, dark;
 };
-const Accent kAccents[] = {
-    {"coral", {0xEE5B3B, 0xFDEBE6, 0x8F2F18}, {0xFF7A59, 0x3A2420, 0xFFB4A2}},
-    {"blue", {0x2F6FED, 0xE4ECFC, 0x1F47A8}, {0x5B8DEF, 0x1B2A4A, 0x9DB8FF}},
-    {"green", {0x22A06B, 0xDFF5E8, 0x17663C}, {0x3DC47A, 0x173326, 0x7FE0A8}},
-    {"violet", {0x8B5CF6, 0xEEE7FC, 0x5A35B5}, {0xA78BFA, 0x2A2147, 0xC4AEFF}},
+const Accent kAccents[kAccentCount] = {
+    {"coral", 0xEE5B3B, 0xFF7A59},  {"blue", 0x2F6FED, 0x5B8DEF},   {"green", 0x22A06B, 0x3DC47A},
+    {"violet", 0x8B5CF6, 0xA78BFA}, {"pink", 0xDB2777, 0xF472B6},   {"teal", 0x0D9488, 0x2DD4BF},
+    {"orange", 0xEA7A0C, 0xFB923C}, {"red", 0xDC2626, 0xF87171},    {"yellow", 0xCA8A04, 0xFACC15},
 };
 
 const Accent& accentByName(const std::string& name) {
@@ -27,6 +27,39 @@ const Accent& accentByName(const std::string& name) {
         if (name == a.name) return a;
     return kAccents[0];
 }
+
+ImU32 mixc(ImU32 a, ImU32 b, float t) {
+    const ImVec4 x = ImGui::ColorConvertU32ToFloat4(a), y = ImGui::ColorConvertU32ToFloat4(b);
+    return ImGui::ColorConvertFloat4ToU32(ImVec4(x.x + (y.x - x.x) * t, x.y + (y.y - x.y) * t, x.z + (y.z - x.z) * t, 1.0f));
+}
+
+// Relative luminance (WCAG).
+float luminance(ImU32 c) {
+    const ImVec4 v = ImGui::ColorConvertU32ToFloat4(c);
+    auto lin = [](float u) { return u <= 0.03928f ? u / 12.92f : std::pow((u + 0.055f) / 1.055f, 2.4f); };
+    return 0.2126f * lin(v.x) + 0.7152f * lin(v.y) + 0.0722f * lin(v.z);
+}
+
+float contrast(ImU32 a, ImU32 b) {
+    const float la = luminance(a), lb = luminance(b);
+    return (std::max(la, lb) + 0.05f) / (std::min(la, lb) + 0.05f);
+}
+
+struct ThemeDef {
+    const char* name;
+    ThemeColors colors;
+};
+// Order matches ThemeId. Light and dark use their hand-tuned palettes.
+const ThemeDef kThemes[kThemeCount] = {
+    {"Light", {0xF4F6FA, 0xFFFFFF, 0x1C2230}},     {"Dark", {0x13161C, 0x1C2028, 0xECEFF4}},
+    {"Match Windows", {0xF4F6FA, 0xFFFFFF, 0x1C2230}},
+    {"Midnight", {0x0D1222, 0x161D33, 0xE6EAF5}},  {"Ocean", {0x0A1C22, 0x112C35, 0xE2F3F6}},
+    {"Forest", {0x0E1813, 0x16261D, 0xE5F1E8}},    {"Sunset", {0x1D111E, 0x2A192C, 0xF7E8EE}},
+    {"Slate", {0x22262D, 0x2C313A, 0xE8EBF0}},     {"OLED black", {0x000000, 0x0C0C0E, 0xF2F2F2}},
+    {"Rose", {0xFAEFF3, 0xFFFFFF, 0x3A1F2B}},      {"Sand", {0xF5EFE4, 0xFFFCF5, 0x2F2A22}},
+    {"Mint", {0xECF6F1, 0xFFFFFF, 0x1B2B24}},      {"High contrast", {0x000000, 0x000000, 0xFFFFFF}},
+    {"Custom", {0x101418, 0x1A2028, 0xECEFF4}},
+};
 
 Palette lightPalette() {
     Palette p{};
@@ -122,6 +155,40 @@ Palette darkPalette() {
     return p;
 }
 
+// Any theme from its three colours: lines, secondary text, tints and so on
+// are mixes of them; status and bus colours come from the light or dark
+// palette.
+Palette derivedPalette(const ThemeColors& c, bool dark) {
+    Palette p = dark ? darkPalette() : lightPalette();
+    const ImU32 bg = hex(c.background), sf = hex(c.surface), tx = hex(c.text);
+    p.bg = bg;
+    p.surface = p.panel = sf;
+    p.surfaceAlt = p.panelAlt = mixc(sf, tx, dark ? 0.05f : 0.03f);
+    p.frame = dark ? mixc(sf, tx, 0.06f) : sf;
+    p.frameHover = mixc(sf, tx, dark ? 0.12f : 0.06f);
+    p.border = mixc(sf, tx, 0.23f);
+    p.text = tx;
+    p.text2 = mixc(tx, sf, 0.27f);
+    p.textDim = mixc(tx, sf, 0.42f);
+    p.outline = dark ? mixc(sf, tx, 0.30f) : mixc(tx, sf, 0.08f);
+    p.shadow = dark ? mixc(bg, hex(0x000000), 0.5f) : mixc(bg, tx, 0.07f);
+    p.line = mixc(sf, tx, dark ? 0.10f : 0.08f);
+    p.lineSoft = mixc(sf, tx, dark ? 0.17f : 0.15f);
+    p.primary = tx;
+    p.onPrimary = dark ? bg : sf;
+    p.track = mixc(sf, tx, dark ? 0.20f : 0.10f);
+    p.segBg = mixc(sf, tx, dark ? 0.07f : 0.05f);
+    p.meterBg = p.line;
+    const float t = dark ? 0.16f : 0.13f;
+    p.goodTint = mixc(sf, p.good, t);
+    p.warnTint = mixc(sf, p.warn, t);
+    p.badTint = mixc(sf, p.bad, t);
+    p.infoTint = mixc(sf, p.busPhysical, t * 0.6f);
+    p.busATint = mixc(sf, p.busPhysical, t);
+    p.busBTint = mixc(sf, p.busVirtual, t);
+    return p;
+}
+
 Palette g_active = lightPalette();
 bool g_dark = false;
 float g_scale = 1.0f;
@@ -129,8 +196,19 @@ Fonts g_fonts;
 
 } // namespace
 
-const char* const kAccentNames[4] = {"coral", "blue", "green", "violet"};
-const char* const kAccentLabels[4] = {"Coral", "Blue", "Green", "Violet"};
+const char* const kAccentNames[kAccentCount] = {"coral", "blue", "green", "violet", "pink", "teal", "orange", "red", "yellow"};
+const char* const kAccentLabels[kAccentCount] = {"Coral", "Blue", "Green", "Violet", "Pink", "Teal", "Orange", "Red", "Yellow"};
+
+float contrastRatio(unsigned rgbA, unsigned rgbB) { return contrast(hex(rgbA), hex(rgbB)); }
+
+const char* themeName(int theme) { return kThemes[std::clamp(theme, 0, kThemeCount - 1)].name; }
+
+ThemeColors themeColors(int theme, const ThemeColors& custom) {
+    theme = std::clamp(theme, 0, kThemeCount - 1);
+    if (theme == kThemeCustom) return custom;
+    if (theme == kThemeSystem) return kThemes[windowsPrefersLight() ? kThemeLight : kThemeDark].colors;
+    return kThemes[theme].colors;
+}
 
 const Palette& pal() { return g_active; }
 Fonts& fonts() { return g_fonts; }
@@ -145,18 +223,42 @@ bool windowsPrefersLight() {
 
 bool themeIsDark() { return g_dark; }
 
-ImU32 accentColor(const std::string& name) {
+ImU32 accentColor(const std::string& name, unsigned customAccent) {
+    if (name == "custom") return hex(customAccent);
     const Accent& a = accentByName(name);
-    return hex(g_dark ? a.dark.color : a.light.color);
+    return hex(g_dark ? a.dark : a.light);
 }
 
-void applyTheme(int theme, float dpiScale, float userScale, const std::string& accent) {
-    g_dark = theme == 1 || (theme == 2 && !windowsPrefersLight());
-    g_active = g_dark ? darkPalette() : lightPalette();
-    const AccentSet& a = g_dark ? accentByName(accent).dark : accentByName(accent).light;
-    g_active.accent = hex(a.color);
-    g_active.accentTint = g_active.accentDim = hex(a.tint);
-    g_active.accentInk = hex(a.ink);
+void applyTheme(const ThemeChoice& choice, float dpiScale, float userScale) {
+    const int theme = std::clamp(choice.theme, 0, kThemeCount - 1);
+    const ThemeColors colors = themeColors(theme, choice.custom);
+    if (theme == kThemeLight || theme == kThemeDark || theme == kThemeSystem) {
+        g_dark = theme == kThemeDark || (theme == kThemeSystem && !windowsPrefersLight());
+        g_active = g_dark ? darkPalette() : lightPalette();
+    } else {
+        g_dark = luminance(hex(colors.background)) < 0.18f;
+        g_active = derivedPalette(colors, g_dark);
+    }
+    if (theme == kThemeContrast) {
+        // Strong outlines and full-strength text everywhere.
+        Palette& p = g_active;
+        p.border = p.outline = p.lineSoft = p.text;
+        p.line = hex(0x9A9A9A);
+        p.text2 = p.text;
+        p.textDim = hex(0xD8D8D8);
+        p.surfaceAlt = p.panelAlt = hex(0x161616);
+        p.frame = hex(0x101010);
+    }
+    const ImU32 accent = choice.accent == "custom" ? hex(choice.customAccent)
+                                                    : hex(g_dark ? accentByName(choice.accent).dark : accentByName(choice.accent).light);
+    Palette& a = g_active;
+    a.accent = accent;
+    a.accentTint = a.accentDim = mixc(a.surface, accent, g_dark ? 0.16f : 0.12f);
+    a.accentInk = g_dark ? mixc(accent, hex(0xFFFFFF), 0.45f) : mixc(accent, hex(0x000000), 0.40f);
+    // Text on the accent colour: dark or white, whichever reads better.
+    a.onAccent = contrast(accent, hex(0x1C2230)) >= contrast(accent, hex(0xFFFFFF)) ? hex(0x1C2230) : hex(0xFFFFFF);
+    // Text on a selected tile: make sure it reads on the tint.
+    if (contrast(a.accentInk, a.accentTint) < 4.5f) a.accentInk = a.text;
     const Palette& p = g_active;
 
     ImGuiStyle& s = ImGui::GetStyle();

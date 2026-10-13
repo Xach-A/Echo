@@ -45,6 +45,7 @@ std::wstring localDataDir() {
 std::wstring sessionFile() { return appDataDir() + L"\\session.json"; }
 std::wstring presetsDir() { return ensure(appDataDir() + L"\\presets"); }
 std::wstring modelsDir() { return ensure(appDataDir() + L"\\models"); }
+std::wstring soundsDir() { return ensure(appDataDir() + L"\\sounds"); }
 std::wstring logFile() { return ensure(localDataDir() + L"\\logs") + L"\\echo.log"; }
 std::wstring crashMarkerFile() { return localDataDir() + L"\\running.marker"; }
 std::wstring imguiIniFile() { return appDataDir() + L"\\layout.ini"; }
@@ -62,5 +63,7 @@ std::wstring executableDir() {
     const auto slash = p.find_last_of(L"\\/");
     return slash == std::wstring::npos ? p : p.substr(0, slash);
 }
+
+std::wstring builtinSoundsDir() { return executableDir() + L"\\sounds"; }
 
 } // namespace echo::paths
