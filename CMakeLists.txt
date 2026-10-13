@@ -134,6 +134,10 @@ add_custom_target(echo_docs ALL DEPENDS ${CMAKE_BINARY_DIR}/docs.stamp)
 file(GLOB ECHO_UI_SOURCES CONFIGURE_DEPENDS src/ui/*.cpp src/app/*.cpp)
 if(ECHO_UI_SOURCES)
 add_executable(Echo WIN32 ${ECHO_UI_SOURCES} resources/Echo.rc)
+# The resource compiler doesn't track headers: rebuild the version info (and
+# icon) when the version changes.
+set_source_files_properties(resources/Echo.rc PROPERTIES OBJECT_DEPENDS
+    "${CMAKE_BINARY_DIR}/generated/Version.h;${CMAKE_SOURCE_DIR}/resources/echo.ico")
 target_link_libraries(Echo PRIVATE echo_audio imgui comdlg32 shcore dbghelp dwmapi windowscodecs)
 if(NOT MSVC)
     target_link_options(Echo PRIVATE -municode)
