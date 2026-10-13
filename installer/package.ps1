@@ -61,8 +61,8 @@ if ($iscc) {
     Write-Warning 'Inno Setup not found; skipped the installer (winget install JRSoftware.InnoSetup --scope user).'
 }
 
-# Checksums
-$sums = Get-ChildItem $pkg -File | Where-Object { $_.Extension -in '.zip', '.exe' } |
+# Checksums of this version's files (older packages left in the folder aren't listed)
+$sums = Get-ChildItem $pkg -File -Filter "$name-$version-*" | Where-Object { $_.Extension -in '.zip', '.exe' } |
     ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name }
 Set-Content -Path (Join-Path $pkg 'SHA256SUMS.txt') -Value $sums -Encoding ascii
 $sums | ForEach-Object { Write-Host $_ }
