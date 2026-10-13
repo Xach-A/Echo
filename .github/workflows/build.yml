@@ -32,6 +32,11 @@ jobs:
           if ($LASTEXITCODE) { throw 'Unpacking LLVM-MinGW failed' }
           Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:RUNNER_TEMP "$name\bin")
 
+      - name: Speech test material (Windows text-to-speech; the tests fall back to a synthetic voice without it)
+        shell: powershell
+        continue-on-error: true
+        run: ./tools/make_speech_samples.ps1 -OutDir build/release/test-speech
+
       - name: Build, test and package
         shell: powershell
         run: |

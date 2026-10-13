@@ -46,6 +46,16 @@ namespace {
 constexpr int kFrame = 480;        // RNNoise frame at 48 kHz
 constexpr int kNetDelay = 960;     // RNNoise's own algorithmic delay (measured: 2 frames)
 constexpr float kScale = 32768.0f; // RNNoise expects 16-bit sample scale
+
+// RNNoise's pitch filter can lift a loud, strongly voiced sound a little above
+// its input (by up to about 0.4 dB): its output is kept under full scale with
+// a soft knee from -0.45 dBFS. Nothing below that changes.
+inline float underFullScale(float y) {
+    constexpr float knee = 0.95f;
+    const float a = std::fabs(y);
+    if (a <= knee) return y;
+    return std::copysign(knee + (1.0f - knee) * std::tanh((a - knee) / (1.0f - knee)), y);
+}
 // Frames the output is held back for the speech check. With RNNoise's own
 // delay (its voice probability describes the newest input frame, its audio
 // is 2 frames older), the check sees kLook + 2 frames ahead.
@@ -242,7 +252,7 @@ protected:
                 }
                 for (int i = 0; i < kFrame; ++i) {
                     const float x = frameIn[i] / kScale;
-                    float y = frameOut[i] / kScale;
+                    float y = underFullScale(frameOut[i] / kScale);
                     if (residual > 0.0f) y += residual * (dry48[i] - y);
                     inPow += static_cast<double>(x) * x;
                     outPow += static_cast<double>(y) * y;

@@ -16,7 +16,9 @@ hardware needed). The AI cases additionally load a real ONNX Runtime.
 Speech material for the noise-suppression tests is generated locally with the
 Windows text-to-speech voices (`tools/make_speech_samples.ps1`, two voices,
 48 kHz; not committed). Without it, the speech cases report SKIPPED and the
-synthetic noise/click/silence/echo cases still run.
+synthetic noise/click/silence/echo cases still run; the loud-voice and double-talk
+checks then use a synthetic voice (voiced syllables on a gliding pitch). GitHub Actions
+generates the samples the same way before testing.
 
 | Area | Test cases |
 |---|---|

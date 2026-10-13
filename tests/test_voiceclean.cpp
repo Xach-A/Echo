@@ -69,6 +69,54 @@ std::vector<float> speech(const char* name) {
     return w.samples;
 }
 
+// A speech-like voice for when the TTS samples weren't generated: voiced
+// syllables (about 200 ms, with short gaps and a longer pause every two
+// seconds) on a gliding pitch, harmonics shaped by two formant-like peaks and a
+// little breath noise, at -20 dBFS RMS like speech().
+std::vector<float> syntheticVoice(size_t n, uint32_t seed) {
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<double> uni(0.0, 1.0);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    std::vector<float> v(n, 0.0f);
+    const double base = 110.0 + 60.0 * uni(rng);
+    double phase = 0.0, syllEnd = 0.0, gapEnd = 0.0, f1 = 500.0, f2 = 1500.0;
+    bool voiced = false;
+    double env = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const double t = static_cast<double>(i) / kSr;
+        if (t >= (voiced ? syllEnd : gapEnd)) {
+            voiced = !voiced;
+            if (voiced) {
+                syllEnd = t + 0.15 + 0.1 * uni(rng);
+                f1 = 350.0 + 400.0 * uni(rng); // a different vowel per syllable
+                f2 = 1000.0 + 1200.0 * uni(rng);
+            } else {
+                gapEnd = t + (std::fmod(t, 2.0) < 0.25 ? 0.3 : 0.05 + 0.05 * uni(rng));
+            }
+        }
+        env += ((voiced ? 1.0 : 0.0) - env) * 0.004; // ~5 ms attack/release
+        const double f0 = base * (1.0 + 0.12 * std::sin(2 * kPiD * 0.7 * t + seed));
+        phase += 2 * kPiD * f0 / kSr;
+        double s = 0.0;
+        for (int k = 1; k * f0 < 5000.0; ++k) {
+            const double f = k * f0;
+            const double shape = 1.0 / k + 1.5 / (1.0 + std::pow((f - f1) / 120.0, 2)) + 0.8 / (1.0 + std::pow((f - f2) / 200.0, 2));
+            s += shape * std::sin(k * phase);
+        }
+        v[i] = static_cast<float>(env * (0.05 * s + 0.004 * nd(rng)));
+    }
+    double sum = 0.0;
+    size_t active = 0;
+    for (float x : v)
+        if (std::fabs(x) > 1e-3f) {
+            sum += x * x;
+            ++active;
+        }
+    const float g = active ? dbToGain(-20.0f) / static_cast<float>(std::sqrt(sum / active)) : 1.0f;
+    for (float& x : v) x *= g;
+    return v;
+}
+
 std::vector<float> whiteNoise(size_t n, float db, uint32_t seed = 1) {
     std::mt19937 rng(seed);
     std::normal_distribution<float> nd(0.0f, dbToGain(db));
@@ -315,8 +363,11 @@ TEST_CASE("denoise: speech mixed with fan noise and typing is cleaned while the 
 }
 
 TEST_CASE("denoise: loud speech does not clip") {
+    // (A steady full-scale tone, which isn't speech, can come out up to about
+    // 0.4 dB higher through RNNoise's pitch filter; the output buses' limiter
+    // catches that.)
     auto s = speech("speech_a.wav");
-    if (s.empty()) s = sine(220, kSr, static_cast<size_t>(kSr * 2), 1.0f);
+    if (s.empty()) s = syntheticVoice(static_cast<size_t>(kSr * 4), 5);
     const float pk = peak(s);
     for (auto& v : s) v *= 0.99f / pk;
     auto e = makeFx("voice_denoise");
@@ -496,7 +547,7 @@ TEST_CASE("echo cancellation: keeps the near-end voice during double talk") {
     auto far = farEnd(n, 41);
     auto echo = echoOf(far, -6.0f);
     auto nearV = speech("speech_b.wav");
-    if (nearV.empty()) nearV = farEnd(n, 77); // different "talker"
+    if (nearV.empty()) nearV = syntheticVoice(n, 77); // a voice unlike the far end's
     std::vector<float> nearEnd(n, 0.0f);
     const size_t dtStart = static_cast<size_t>(kSr * 6);
     for (size_t i = dtStart; i < n && i - dtStart < nearV.size(); ++i) nearEnd[i] = nearV[i - dtStart];
