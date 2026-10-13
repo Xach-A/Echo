@@ -279,6 +279,11 @@ private:
     std::future<std::string> contentVecDownload_;
     win::DownloadProgress contentVecProgress_;
     std::string contentVecError_;
+    // Installing ONNX Runtime (on click): "" when it succeeded.
+    std::future<std::string> ortInstall_;
+    win::DownloadProgress ortProgress_;
+    std::string ortError_;
+    bool snapshotNoOrt_ = false; // snapshots: show the AI setup as before installing
     bool snapshotShowAi_ = false;
     // VB-CABLE: download VB-Audio's pack, then open its installer.
     struct VbCableJob {

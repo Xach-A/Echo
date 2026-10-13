@@ -7,14 +7,16 @@ What this installer does
 What it does NOT do
   * It installs no drivers, services or background updaters.
   * It does not change your Windows default playback or recording devices.
-  * It does not download anything and Echo makes no network connections.
+  * It downloads nothing. Echo itself goes online only when you click one of its
+    download buttons (Install VB-CABLE, Install the AI engine, Download ContentVec),
+    and checks every download before keeping it. No accounts, ads or telemetry.
 
-Virtual microphone / virtual speaker
-  Other apps (Discord, OBS, games) can use Echo's output as a microphone through a
-  virtual audio cable driver. That driver is a separate product (for example the free
-  VB-CABLE from vb-audio.com) that you install yourself; it needs administrator
-  approval. Echo detects it automatically. See docs\VIRTUAL_DEVICES.md.
+Virtual microphone (Discord, Roblox, OBS, games)
+  Other apps hear Echo through a virtual audio cable driver, a separate product.
+  Echo's setup guide has an Install VB-CABLE button: it downloads VB-Audio's free
+  VB-CABLE and opens VB-Audio's own installer, which asks Windows for administrator
+  approval. See docs\VIRTUAL_DEVICES.md.
 
-AI voice conversion (optional)
-  Needs ONNX Runtime and a voice model you are licensed to use. Neither is bundled.
-  See docs\AI_VOICE.md.
+AI voices (optional)
+  Need Microsoft's ONNX Runtime (Install the AI engine, in Voices > AI voice) and a
+  voice model you are allowed to use. Neither is bundled. See docs\AI_VOICE.md.

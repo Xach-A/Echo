@@ -75,9 +75,10 @@ The noise-removal tests use short excerpts of BigSoundBank keyboard and mouse re
 
 ## ONNX Runtime and DirectML (not included)
 
-ONNX Runtime (MIT, Microsoft) is downloaded by `tools\fetch_onnxruntime.ps1` only when you run
-it: the CPU build from GitHub, or with `-Gpu` the DirectML build from nuget.org. The DirectML
-build uses the DirectML that is part of Windows. Only if Windows' copy is too old does the script
+ONNX Runtime (MIT, Microsoft) is downloaded only on request: by Echo's **Install the AI engine**
+button (the DirectML build from nuget.org, with its LICENSE and ThirdPartyNotices.txt, into
+`%APPDATA%\Echo\ai`), or by `tools\fetch_onnxruntime.ps1` (the CPU build from GitHub, or with
+`-Gpu` the DirectML build). The DirectML build uses the DirectML that is part of Windows. Only if Windows' copy is too old does the script
 offer Microsoft's DirectML package, under Microsoft's DirectML license (which allows Microsoft to
 collect usage data through Windows); it asks first.
 

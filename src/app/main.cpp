@@ -24,6 +24,7 @@
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 #include "session/Paths.h"
+#include "session/RunMarker.h"
 #include "session/Serialization.h"
 #include "ui/App.h"
 #include "ui/Theme.h"
@@ -46,6 +47,7 @@ double g_resumeAt = 0.0;
 
 // ---- notification-area (tray) icon: only while "keep running when closed" is on ----
 constexpr UINT WM_ECHO_TRAY = WM_APP + 1;
+constexpr UINT WM_ECHO_QUIT = WM_APP + 2; // from `Echo.exe --quit`
 constexpr UINT kTrayOpen = 1, kTrayMute = 2, kTrayQuit = 3;
 UINT g_taskbarCreated = 0;
 bool g_trayAdded = false;
@@ -242,6 +244,19 @@ LONG WINAPI crashHandler(EXCEPTION_POINTERS* ep) {
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
+// Remembers the window's place and size in the settings.
+void storePlacement(HWND hwnd, echo::ui::EchoApp& app) {
+    WINDOWPLACEMENT wp{sizeof(wp)};
+    if (GetWindowPlacement(hwnd, &wp)) {
+        auto& ui = app.uiSettings();
+        ui.maximized = wp.showCmd == SW_SHOWMAXIMIZED;
+        ui.windowX = wp.rcNormalPosition.left;
+        ui.windowY = wp.rcNormalPosition.top;
+        ui.windowW = wp.rcNormalPosition.right - wp.rcNormalPosition.left;
+        ui.windowH = wp.rcNormalPosition.bottom - wp.rcNormalPosition.top;
+    }
+}
+
 LRESULT WINAPI wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam)) return true;
     switch (msg) {
@@ -284,6 +299,9 @@ LRESULT WINAPI wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         if (g_app) g_app->requestQuit();
         return 0;
+    case WM_ECHO_QUIT:
+        if (g_app) g_app->requestQuit(); // as the tray menu's Quit: saves and exits
+        return 0;
     case WM_ECHO_TRAY:
         switch (LOWORD(lParam)) {
         case NIN_SELECT:
@@ -302,6 +320,18 @@ LRESULT WINAPI wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (lParam && g_app && wcscmp(reinterpret_cast<const wchar_t*>(lParam), L"ImmersiveColorSet") == 0)
             g_app->onSystemThemeChanged();
         break;
+    case WM_QUERYENDSESSION:
+        return TRUE; // never holds up a shutdown, restart or sign-out
+    case WM_ENDSESSION:
+        // Windows ends Echo soon after this returns (it sends no WM_CLOSE):
+        // save now, and leave no marker that would look like a crash.
+        if (wParam && g_app) {
+            storePlacement(hwnd, *g_app);
+            g_app->saveNow();
+            echo::runmarker::remove(echo::paths::crashMarkerFile());
+            ECHO_LOG_INFO("---- Windows is shutting down, restarting or signing out: settings saved ----");
+        }
+        return 0;
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
@@ -314,10 +344,25 @@ LRESULT WINAPI wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+// `Echo.exe --quit`: asks the running Echo to save and exit, and waits for it
+// (up to 15 s). Exit code 0 when no Echo runs any more (used by build.ps1).
+int quitRunningInstance() {
+    const HWND other = FindWindowW(kWindowClass, nullptr);
+    if (!other) return 0;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(other, &pid);
+    const HANDLE proc = OpenProcess(SYNCHRONIZE, FALSE, pid);
+    PostMessageW(other, WM_ECHO_QUIT, 0, 0);
+    const DWORD r = proc ? WaitForSingleObject(proc, 15000) : WAIT_FAILED;
+    if (proc) CloseHandle(proc);
+    return r == WAIT_OBJECT_0 ? 0 : 1;
+}
+
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int showCmd) {
     const std::wstring args = cmdLine ? cmdLine : L"";
+    if (args.find(L"--quit") != std::wstring::npos) return quitRunningInstance();
     bool safeMode = args.find(L"--safe-mode") != std::wstring::npos;
     const bool resetSettings = args.find(L"--reset-settings") != std::wstring::npos;
     const bool startMinimized = args.find(L"--minimized") != std::wstring::npos;
@@ -349,19 +394,29 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int showCmd)
         ECHO_LOG_INFO("Settings reset requested from the command line");
     }
 
-    // Crash recovery: a leftover marker means the last run did not exit cleanly.
+    // Crash recovery: a leftover marker means the last run did not exit
+    // cleanly, unless it was left in an earlier Windows sign-in (the PC shut
+    // down or lost power while Echo ran).
     const std::wstring marker = echo::paths::crashMarkerFile();
-    std::error_code ec;
-    if (!safeMode && snapshotDir.empty() && std::filesystem::exists(marker, ec)) {
-        const int r = MessageBoxW(nullptr,
-                                  ECHO_APP_NAME_W L" did not close normally last time.\n\n"
-                                  L"Start in safe mode? (Effects are bypassed and audio is not started automatically, "
-                                  L"so you can fix a problematic setting.)",
-                                  ECHO_APP_NAME_W, MB_YESNO | MB_ICONWARNING);
-        safeMode = r == IDYES;
-        ECHO_LOG_WARN("Previous session ended unexpectedly; safe mode %s", safeMode ? "on" : "off");
+    if (!safeMode && snapshotDir.empty()) {
+        switch (echo::runmarker::check(marker, echo::runmarker::signInTime())) {
+        case echo::runmarker::Previous::Crashed: {
+            const int r = MessageBoxW(nullptr,
+                                      ECHO_APP_NAME_W L" did not close normally last time.\n\n"
+                                      L"Start in safe mode? (Effects are bypassed and audio is not started automatically, "
+                                      L"so you can fix a problematic setting.)",
+                                      ECHO_APP_NAME_W, MB_YESNO | MB_ICONWARNING);
+            safeMode = r == IDYES;
+            ECHO_LOG_WARN("Previous session ended unexpectedly; safe mode %s", safeMode ? "on" : "off");
+            break;
+        }
+        case echo::runmarker::Previous::EndedWithWindows:
+            ECHO_LOG_INFO("The last run ended when Windows shut down or signed out (not a crash)");
+            break;
+        case echo::runmarker::Previous::Clean: break;
+        }
     }
-    if (FILE* f = _wfopen(marker.c_str(), L"wb")) fclose(f);
+    echo::runmarker::create(marker);
 
     ImGui_ImplWin32_EnableDpiAwareness();
     const float dpi = ImGui_ImplWin32_GetDpiScaleForMonitor(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY));
@@ -396,7 +451,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int showCmd)
     wc.lpfnWndProc = wndProc;
     wc.hInstance = hInstance;
     wc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(1));
-    wc.hIconSm = wc.hIcon;
+    // The small (title bar) icon from its own hand-tuned size, not the 32 px one shrunk.
+    wc.hIconSm = static_cast<HICON>(LoadImageW(hInstance, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                                               GetSystemMetrics(SM_CYSMICON), 0));
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.lpszClassName = kWindowClass;
     RegisterClassExW(&wc);
@@ -549,16 +606,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int showCmd)
     if (frameTimer) CloseHandle(frameTimer);
     trayRemove(hwnd);
 
-    // Persist window placement.
-    WINDOWPLACEMENT wp{sizeof(wp)};
-    if (GetWindowPlacement(hwnd, &wp)) {
-        auto& ui = app.uiSettings();
-        ui.maximized = wp.showCmd == SW_SHOWMAXIMIZED;
-        ui.windowX = wp.rcNormalPosition.left;
-        ui.windowY = wp.rcNormalPosition.top;
-        ui.windowW = wp.rcNormalPosition.right - wp.rcNormalPosition.left;
-        ui.windowH = wp.rcNormalPosition.bottom - wp.rcNormalPosition.top;
-    }
+    storePlacement(hwnd, app);
     app.shutdown();
     g_app = nullptr;
     ImGui_ImplDX11_Shutdown();
@@ -567,7 +615,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int showCmd)
     cleanupDevice();
     DestroyWindow(hwnd);
     UnregisterClassW(kWindowClass, hInstance);
-    std::filesystem::remove(marker, ec);
+    echo::runmarker::remove(marker);
     ECHO_LOG_INFO("---- %s exited cleanly ----", ECHO_APP_NAME);
     echo::log::shutdown();
     CoUninitialize();

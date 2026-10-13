@@ -54,6 +54,10 @@ public:
     std::string dllPath() const { return path_; }
     std::vector<std::string> providers() const { return providers_; }
     bool hasGpu() const; // DirectML is in this build
+    // DirectML is here and the fastest card has its own memory (1 GB or
+    // more): a graphics card, not built-in graphics that may be slower than
+    // the CPU. New AI voices use the graphics card only then.
+    bool gpuRecommended() const;
     // The OrtApi version agreed with the DLL (older DLLs offer older ones).
     uint32_t apiVersion() const { return apiVersion_; }
     // Adds DirectML on the fastest graphics card to `opts`. Returns a name

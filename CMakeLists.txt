@@ -78,7 +78,7 @@ endif()
 file(GLOB ECHO_CORE_SOURCES CONFIGURE_DEPENDS
     src/core/*.cpp src/dsp/*.cpp src/dsp/effects/*.cpp src/session/*.cpp src/ai/*.cpp)
 add_library(echo_core STATIC ${ECHO_CORE_SOURCES})
-target_link_libraries(echo_core PUBLIC echo_options avrt rnnoise dxgi)
+target_link_libraries(echo_core PUBLIC echo_options avrt rnnoise dxgi secur32)
 
 # ---------------------------------------------------------------------------
 # Windows audio platform layer (WASAPI, sessions, virtual cables)
@@ -121,7 +121,7 @@ add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/sounds.stamp
     COMMENT "Copying the built-in sounds")
 add_custom_target(echo_sounds ALL DEPENDS ${CMAKE_BINARY_DIR}/sounds.stamp)
 # The documentation too (Settings > About > Open documentation).
-file(GLOB ECHO_DOC_FILES CONFIGURE_DEPENDS docs/*)
+file(GLOB ECHO_DOC_FILES LIST_DIRECTORIES false CONFIGURE_DEPENDS docs/*.md)
 add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/docs.stamp
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/docs
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ECHO_DOC_FILES} ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/docs

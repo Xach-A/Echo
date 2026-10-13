@@ -87,7 +87,8 @@ there also mutes Echo's capture.
 
 ## Echo won't start / crashes
 
-* After an unclean exit Echo offers safe mode. Start menu also has
+* After Echo crashed it offers safe mode on the next start (not after Windows
+  shut down, restarted or signed out while Echo ran). Start menu also has
   "Echo (safe mode)", or run `Echo.exe --safe-mode`.
 * Reset all settings: `Echo.exe --reset-settings` (keeps a backup) or Settings >
   Startup & data > Reset to defaults.

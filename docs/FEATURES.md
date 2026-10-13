@@ -144,7 +144,8 @@ gate/EQ/compression → voice transformation. Effects can be reordered freely.
 | Async inference pipeline, fixed latency, dry fallback, chunk crossfade; the delay set from the voice's measured speed | Tested with real ONNX Runtime 1.30.0 (the converted voice lands exactly at the reported delay; it was 2 crossfade lengths late before) |
 | Echo model packages (model.json + ONNX) with license/consent metadata, validation | Tested |
 | RVC v1 voices | Implemented as the original RVC does it, not tried on a real v1 voice |
-| GPU (DirectML): `fetch_onnxruntime.ps1 -Gpu`; the fastest card is picked; on by default when available | Tested + HW-verified on an RTX 5070 Ti Laptop GPU: same output as the CPU (graphs within 4e-7, real voice 0.01 dB); delay 0.24 / 0.29 / 0.43 s (Quicker / Balanced / Smoother), 0 fallbacks |
+| AI engine installed on click (ONNX Runtime 1.24.4 DirectML build, 12 MB from nuget.org, size and SHA-256 pinned) | HW-verified (`echo_hwtest ort-install`: downloaded, checked and unpacked in 0.9 s; loaded from its folder and ran on the graphics card) |
+| GPU (DirectML); the fastest card is picked; on by default when that card has its own memory | Tested + HW-verified on an RTX 5070 Ti Laptop GPU: same output as the CPU (graphs within 4e-7, real voice 0.01 dB); delay 0.24 / 0.29 / 0.43 s (Quicker / Balanced / Smoother), 0 fallbacks |
 | Pitch for RVC | Echo's YIN tracker (RVC's neural pitch models are not included) |
 
 ## Recording and monitoring
@@ -167,7 +168,7 @@ gate/EQ/compression → voice transformation. Effects can be reordered freely.
 | Persistence (autosave, atomic writes, backup recovery), import/export | Tested |
 | Reset to defaults (Settings > Startup & data): choose any of inputs/outputs/routing, hotkeys, soundboard, audio quality and recording, look and behaviour; presets, recordings, AI models and sound files are always kept; the window keeps its place | Tested (everything back to a fresh installation; only the chosen parts change; nothing chosen = no change) |
 | Presets: 33 factory + user save/rename/duplicate/delete/import/export | Tested |
-| Safe mode after crash, crash dumps, logs, diagnostic report | Implemented |
+| Safe mode after crash, crash dumps, logs, diagnostic report; no safe-mode offer after Windows shut down, restarted or signed out (Echo saves its settings then), or when the last run belonged to an earlier Windows sign-in (power loss) | Implemented; shutdown handling tested (simulated shutdown messages + forced end: settings saved, no leftover marker) |
 | Start with Windows (per user), single instance | Implemented |
 | Push to talk / push to mute (hold a key or mouse button; release delay) and a mute key, working while other apps are in front | Tested (key logic, capture of a new key, engine gate silences microphones only) + HW-verified with synthetic key presses (`echo_hwtest hotkeys`: gate opens ≤ 5 ms after the key goes down). Not yet tried with a physical key inside a game, or with apps running as administrator. |
 | Every kind of key input for hotkeys: keyboard keys (also media/browser keys, F13–F24 and keys Windows has no key code for), mouse buttons 3–5 and wheel tilt, and Xbox-style game controller buttons (XInput); presses shorter than one poll (instant taps, as some mice and mouse software send) are never missed | Tested (taps, capture, names, saving) + HW-verified: 20 of 20 instant taps caught (key-state polling alone, the old method, caught 1 of 20). Keys are read with key-state polling plus Windows raw input (no keyboard hook: they still reach the app in front). Not tried with a physical mouse whose button failed before, or with a controller. |

@@ -301,7 +301,7 @@ void AiVoiceEffect::workerMain() {
             }
             if (gpuAuto && next.valid) {
                 OrtRuntime& rt = OrtRuntime::instance();
-                gpu = rt.ensureLoaded() && rt.hasGpu();
+                gpu = rt.ensureLoaded() && rt.gpuRecommended();
                 std::lock_guard<std::mutex> lock(modelMutex_);
                 if (gpuAuto_) {
                     pendingGpu_ = gpu;

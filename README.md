@@ -1,12 +1,30 @@
-# Echo
+# <img src="resources/echo-256.png" width="40" align="center" alt=""> Echo
 
 A free, open-source Windows 10/11 virtual audio mixer and real-time voice changer:
 multichannel mixing and routing, per-application capture, a 30-effect DSP library,
 neural background-noise suppression (on by default for microphones) and echo cancellation,
 pitch/formant voice changing, pitch correction ("autotune"), a soundboard, recording, and
 optional AI voices (RVC models, run on your PC). No accounts, subscriptions, ads or telemetry;
-Echo goes online only when you click Download ContentVec (the speech model RVC voices need) or
-Install VB-CABLE.
+Echo goes online only when you click Install VB-CABLE, Install the AI engine or Download
+ContentVec (the speech model RVC voices need).
+
+![Home: push to talk, noise removal and quick voices](docs/images/home.png)
+
+| Voices | Soundboard |
+|---|---|
+| ![Voices](docs/images/voices.png) | ![Soundboard](docs/images/soundboard.png) |
+
+## Download
+
+Get `Echo-<version>-setup-win64.exe` (or the portable zip) from the
+[Releases](../../releases) page. `SHA256SUMS.txt` next to them lists their checksums.
+
+Echo isn't code-signed yet, so Windows warns before the first start:
+
+* **"Windows protected your PC"** (SmartScreen): click **More info**, then **Run anyway**.
+* **Smart App Control** (Windows Security > App & browser control), when it is on, blocks
+  apps that aren't signed and offers no way to allow them. Echo then only runs with Smart
+  App Control turned off; check what that means for your PC before you do it.
 
 ## Quick start
 
@@ -18,10 +36,11 @@ Install VB-CABLE.
    and keep your headphones as its speakers (output); leave Windows' own sound settings as they
    are. See `docs/VIRTUAL_DEVICES.md`.
 4. **Home**: mute, push to talk status, noise removal, hearing yourself and quick voices.
-   **Voices**: one-click voices (deep, chipmunk, robot, monster, radio, ...) with the delay each
-   adds, pitch/formant and pitch correction, noise removal, voice gate and echo cancellation.
-   **Mixer**, **Apps**, **Devices**, **Recorder** and **Settings** (including push-to-talk and
-   mute hotkeys) are the other screens.
+   **Voices**: one-click voices (deep, chipmunk, robot, monster, radio, ...), pitch and pitch
+   correction, noise removal, voice gate, echo cancellation, and AI voices (add an RVC voice,
+   click **Install the AI engine**; see `docs/AI_VOICE.md`). **Soundboard**: 16 built-in
+   sounds plus your own, with hotkeys. **Mixer**, **Apps**, **Devices**, **Recorder** and
+   **Settings** (including push-to-talk and mute hotkeys) are the other screens.
 
 ## Build
 

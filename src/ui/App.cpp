@@ -40,6 +40,7 @@ constexpr int kMaxPads = SoundboardSource::kMaxPads;
 EchoApp::EchoApp() = default;
 EchoApp::~EchoApp() {
     contentVecProgress_.cancel = true; // a download in progress stops (the future waits for it)
+    ortProgress_.cancel = true;
     vbCableProgress_.cancel = true;
 }
 
@@ -669,6 +670,7 @@ void EchoApp::snapshotStep() {
         {"settings-diagnostics", -1, Page::Settings, SettingsTab::Diagnostics, nullptr, false},
         {"home-dark", -1, Page::Home, SettingsTab::Audio, "Deep Voice", false},
         {"voices-ai", -1, Page::Voices, SettingsTab::Audio, nullptr, false},
+        {"voices-ai-setup", -1, Page::Voices, SettingsTab::Audio, nullptr, false},
         {"theme-midnight", -1, Page::Voices, SettingsTab::Audio, "Deep Voice", false},
         {"theme-rose", -1, Page::Home, SettingsTab::Audio, "Deep Voice", false},
         {"theme-contrast", -1, Page::Soundboard, SettingsTab::Audio, nullptr, false},
@@ -723,7 +725,8 @@ void EchoApp::snapshotStep() {
             mc_->soundboard().play(1);
         }
         if (std::strcmp(st.file, "settings-reset") == 0) openResetPopup_ = true;
-        snapshotShowAi_ = std::strcmp(st.file, "voices-ai") == 0;
+        snapshotShowAi_ = std::strcmp(st.file, "voices-ai") == 0 || std::strcmp(st.file, "voices-ai-setup") == 0;
+        snapshotNoOrt_ = std::strcmp(st.file, "voices-ai-setup") == 0;
         if (std::strcmp(st.file, "home-dark") == 0) {
             mc_->session().ui.theme = 1;
             setDpiScale(dpi_);

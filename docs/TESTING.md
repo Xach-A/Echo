@@ -7,7 +7,7 @@ LLVM-MinGW clang 23.1.1, Release build).
 
 ## 1. Automated tests (`echo_tests.exe`)
 
-160 test cases, **4113 assertions, all passing** (2026-10-11; the 97 cases of
+162 test cases, **4120 assertions, all passing** (2026-10-12; the 97 cases of
 2026-10-09 also ran under AddressSanitizer + UndefinedBehaviorSanitizer with zero
 reports, see section 5). They use generated signals,
 the real engine and controller code, and in-memory fake devices (no audio
@@ -25,7 +25,7 @@ synthetic noise/click/silence/echo cases still run.
 | Robustness | every effect under random parameters, 4 trials each (no NaN/Inf, bounded); defaults never silent; reproducible output; NaN-producing effect isolated; bypass crossfade has no discontinuity |
 | Engine & routing | unity path; multiple destinations; isolated bus mixes; live routing changes without clicks; mute/solo; dB composition of trim/fader/send/bus; pre-fader sends; pan law/balance; bus limiter; repeated snapshot swaps; identical output for 37- vs 480-sample blocks |
 | Controller & devices | virtual-cable pairing with VB-CABLE's real endpoint names (standard endpoint preferred, 16-channel endpoint secondary, different drivers never paired); a cable installed while Echo runs is assigned to the unassigned virtual-mic bus (and never to a bus the user set) and feedback protection covers the secondary endpoint; default session; shared capture streams; mic → headphones + virtual mic with independent gains; feedback blocking (cable loop and loopback loop); device loss and reconnection; reconnect by name; missing devices at startup; app capture by process name; 44.1↔48 kHz with 6-channel output; 200 ppm drift for 60 s with zero under/overruns; 4-channel input channel selection |
-| Persistence & presets | session round trip; tolerant parsing of unknown/future fields; atomic save and recovery from a corrupt file; all 33 factory presets valid; applying "Deep Voice" measured at −5 st through the whole controller path; user preset save/rename/duplicate/delete; older sessions upgraded once (voice gate depth, AI voice Buffer 400 → 100, Response defaulting to Balanced) |
+| Persistence & presets | session round trip; tolerant parsing of unknown/future fields; atomic save and recovery from a corrupt file; all 33 factory presets valid; applying "Deep Voice" measured at −5 st through the whole controller path; user preset save/rename/duplicate/delete; older sessions upgraded once (voice gate depth, AI voice Buffer 400 → 100, Response defaulting to Balanced); the run marker tells a crash from a run that ended with Windows (an earlier sign-in) |
 | Recording | bus (post-fader) and strip (pre-fader) recordings in 16/24/32-bit, with 48→44.1 kHz conversion, read back and checked for rate, level and pitch |
 | Stress | 300 rapid add/remove/route operations; 40 start/stop cycles of the real engine thread; 120 graph edits while the engine thread runs |
 | Noise suppression | hiss, computer fan (hum + broadband), air conditioning, pink room tone (−75…−80 dB); synthetic keyboard clicks (−65 dB energy, peaks −6 → −71 dBFS); digital silence stays silent; clean speech (correlation 0.97, level −0.1 dB, latency 40 ms as reported); speech + fan + typing (noise between words −32 dB, speech −0.5 dB, +8.3 dB spectral SNR); loud speech does not clip; strength 0 / mix 0 transparency; two inputs independent; voice gate (−30 dB extra on noise, speech untouched); 44.1 kHz with resampling (reported latency now within 1 sample of the measured one; it was 61 samples too long before); CPU 0.55 % of one core; default-on rules (new microphones, cables excluded, preset combination, removal remembered, one-time upgrade of old sessions); in the engine: the default microphone strip cleans the virtual mic |
@@ -74,8 +74,8 @@ machine:
 
 `Echo.exe --ui-snapshots=<dir>` renders all pages and every setup-wizard step
 into PNG files using a throwaway profile, with real devices running. All 17
-snapshots (32 now: every screen incl. the Soundboard and mixed voices, the effects editor, Settings sections, all 7 setup
-steps, the virtual-mic step and the Devices page as without a cable (Install VB-CABLE), Home in the dark theme, the AI voice setup, and the Midnight, Rose, High contrast and custom themes) (including the Voices screen's noise & echo controls with live noise suppression and
+snapshots (33 now: every screen incl. the Soundboard and mixed voices, the effects editor, Settings sections, all 7 setup
+steps, the virtual-mic step and the Devices page as without a cable (Install VB-CABLE), Home in the dark theme, the AI voice setup with and without the AI engine, and the Midnight, Rose, High contrast and custom themes) (including the Voices screen's noise & echo controls with live noise suppression and
 echo cancellation on the real microphone) were reviewed; the app ran with live metering from the real
 microphone, 0 dropouts, ~1 % DSP load, and exited cleanly. Normal launch,
 first-run wizard, autosave, and clean shutdown were also checked by hand.
@@ -130,33 +130,48 @@ margin keep them from becoming dropouts.
 
 ## 7. Installer
 
-`Echo-0.1.0-setup-win64.exe` was run silently as a normal user
-(`/VERYSILENT /SUPPRESSMSGBOXES /CURRENTUSER /DIR=<scratch folder>`): exit
-code 0, no elevation prompt, files installed (no ONNX Runtime or drivers
-bundled), Start-menu shortcuts and the per-user uninstall entry created. The
-installed `Echo.exe` started and rendered all 17 snapshot pages with live
-audio, then exited cleanly. The silent uninstall (exit code 0) removed the
-program folder, shortcuts and uninstall entry, and kept the user's settings
-(the "also delete settings?" question defaults to No).
+2026-10-12, the current version: `Echo-0.1.0-setup-win64.exe` (8.6 MB) was run
+silently as a normal user (`/VERYSILENT /SUPPRESSMSGBOXES /CURRENTUSER
+/DIR=<scratch folder>`): exit code 0 after 2.9 s, no elevation prompt; Echo.exe,
+the 16 built-in sounds with their credits, 33 presets, the documentation and the
+ONNX Runtime script were installed, and no ONNX Runtime or drivers. The installed
+`Echo.exe` started and rendered all 33 snapshot pages (the AI voice panel offering
+Install the AI engine, as nothing AI is bundled), then exited cleanly. The silent
+uninstall (exit code 0) removed the program folder entirely. This run happened
+inside the Claude app, whose app isolation keeps Start-menu shortcuts and the
+uninstall entry out of the real user profile, so those two were checked only in
+the earlier run (2026-10-09: created on install, removed on uninstall, and the
+user's settings kept; the "also delete settings?" question defaults to No).
 
 ## Not tested (and why)
 
+* **Other PCs** — everything above ran on one laptop (Windows 11, Realtek
+  audio, a Blue Snowball USB microphone, an NVIDIA RTX 5070 Ti Laptop GPU with
+  Intel graphics). Not yet tried: Windows 10, USB and Bluetooth headsets,
+  other sound cards, AMD or Intel graphics for AI voices.
 * **Selecting the virtual microphone inside Discord/OBS** — not automated;
   the cable's recording side that those apps read was verified directly
-  (`echo_hwtest virtualmic`).
+  (`echo_hwtest virtualmic`). In real use (Roblox voice chat) other players
+  heard the voice effects, and Chrome routed into the mic arrived unchanged
+  (measured against Chrome's own audio: within 0.00 dB in every band).
+* **VB-CABLE's installer through Echo's Install VB-CABLE button** — the
+  download, checksum and unpacking were run; VB-Audio's installer itself was
+  not, because VB-CABLE was already installed on the test PC.
 * **Exclusive mode, low-latency shared mode** — implemented with automatic
   fallback; not exercised on this hardware.
 * **Physical unplug/replug, sleep/resume, changing the Windows default device
-  by hand** — logic tested with fake devices only.
+  by hand** — logic tested with fake devices only. (Windows shutting down
+  while Echo runs was checked for real: no "did not close normally" message
+  afterwards.)
 * **Thread sanitizer** — not available on Windows.
 * **Echo cancellation with real speakers** — verified with simulated room echo
   and through the engine with fake devices; not yet with a physical speaker/
   microphone pair (needs someone speaking while audio plays aloud).
-* **GPU (DirectML) inference** — no DirectML ONNX Runtime build installed.
-* **How RVC voices sound** — the numbers above are measured; nobody has listened
-  to Echo's RVC output yet. Real-time conversion differs from whole-file
-  conversion by 5.5 dB (log-mel) on a test recording, against 2.6 dB between two
-  whole-file conversions with different random noise.
+* **How RVC voices sound, formally** — the numbers above are measured, and the
+  developer used a real RVC voice in voice chat; there was no listening test
+  with several people. Real-time conversion differs from whole-file conversion
+  by 5.5–6.6 dB (log-mel, depending on Response) on a test recording, against
+  2.6 dB between two whole-file conversions with different random noise.
 * **Interactive UI flows** (clicking every control) — no UI automation
   framework; covered by reviewing snapshots and manual runs.
 * **Installer upgrade over a previous version, and installing for all users

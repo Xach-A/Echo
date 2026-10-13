@@ -125,8 +125,10 @@ bool OrtRuntime::hasGpu() const {
 
 namespace {
 // The graphics card Windows ranks fastest (what DirectML picks with the
-// high-performance preference), e.g. "NVIDIA GeForce RTX 4070".
-std::string fastestGpuName() {
+// high-performance preference), e.g. "NVIDIA GeForce RTX 4070", and its own
+// memory in bytes.
+std::string fastestGpuName(uint64_t* dedicatedMemory = nullptr) {
+    if (dedicatedMemory) *dedicatedMemory = 0;
     IDXGIFactory6* factory = nullptr;
     if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory6), reinterpret_cast<void**>(&factory)))) return {};
     std::string name;
@@ -134,13 +136,23 @@ std::string fastestGpuName() {
     if (SUCCEEDED(factory->EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, __uuidof(IDXGIAdapter1),
                                                       reinterpret_cast<void**>(&adapter)))) {
         DXGI_ADAPTER_DESC1 d{};
-        if (SUCCEEDED(adapter->GetDesc1(&d))) name = wideToUtf8(d.Description);
+        if (SUCCEEDED(adapter->GetDesc1(&d)) && !(d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) {
+            name = wideToUtf8(d.Description);
+            if (dedicatedMemory) *dedicatedMemory = d.DedicatedVideoMemory;
+        }
         adapter->Release();
     }
     factory->Release();
     return name;
 }
 } // namespace
+
+bool OrtRuntime::gpuRecommended() const {
+    if (!hasGpu()) return false;
+    uint64_t memory = 0;
+    fastestGpuName(&memory);
+    return memory >= (1ull << 30);
+}
 
 std::string OrtRuntime::addGpu(OrtSessionOptions* opts) const {
     if (!api_ || !hasGpu()) return {};

@@ -82,23 +82,28 @@ void EchoApp::drawHeader() {
         dl->AddLine(ImVec2(wp.x, wp.y + ws.y - 0.75f * sc), ImVec2(wp.x + ws.x, wp.y + ws.y - 0.75f * sc), p.line, 1.5f * sc);
     }
 
-    // Logo: accent square with a sound-wave mark, then the name.
+    // Logo: the app icon's microphone (a dark tile; head and holder in the
+    // accent colour), then the name.
     const ImVec2 lp = ImGui::GetCursorScreenPos();
     const float logo = 32.0f * sc;
     const float cy = lp.y + 18.0f * sc;
     if (ImGui::InvisibleButton("##logo", ImVec2(logo + 70.0f * sc, 36.0f * sc))) navigate(Page::Home);
     const ImVec2 l0(lp.x, cy - logo * 0.5f), l1(lp.x + logo, cy + logo * 0.5f);
-    dl->AddRectFilled(l0, l1, p.accent, 10.0f * sc);
-    dl->AddRect(l0, l1, p.outline, 10.0f * sc, 1.5f * sc);
+    dl->AddRectFilled(l0, l1, IM_COL32(32, 36, 42, 255), 9.0f * sc);
+    dl->AddRect(l0, l1, p.outline, 9.0f * sc, 1.5f * sc);
     {
-        // Five bars of a waveform.
-        const float bars[] = {0.25f, 0.55f, 0.85f, 0.55f, 0.25f};
-        const float bx = l0.x + 7.0f * sc, step = 4.5f * sc;
-        for (int i = 0; i < 5; ++i) {
-            const float hh = logo * 0.5f * bars[i];
-            dl->AddLine(ImVec2(bx + i * step, cy - hh * 0.5f - 1.0f * sc), ImVec2(bx + i * step, cy + hh * 0.5f + 1.0f * sc),
-                        p.onAccent, 2.4f * sc);
-        }
+        // Same shapes as the small icon sizes (tools/make_icon.py), in tile units.
+        auto at = [&](float x, float y) { return ImVec2(l0.x + x * logo, l0.y + y * logo); };
+        const ImU32 body = IM_COL32(88, 95, 107, 255), stem = IM_COL32(56, 61, 70, 255), collar = IM_COL32(12, 13, 16, 255);
+        // Holder: a U behind the body.
+        dl->PathLineTo(at(0.21f, 0.42f));
+        dl->PathArcTo(at(0.5f, 0.55f), 0.29f * logo, 3.14159265f, 0.0f, 24);
+        dl->PathLineTo(at(0.79f, 0.42f));
+        dl->PathStroke(p.accent, 0.08f * logo);
+        dl->AddRectFilled(at(0.445f, 0.70f), at(0.555f, 0.90f), stem, 0.02f * logo, ImDrawFlags_RoundCornersBottom);
+        dl->AddRectFilled(at(0.32f, 0.47f), at(0.68f, 0.75f), body, 0.18f * logo, ImDrawFlags_RoundCornersBottom);
+        dl->AddRectFilled(at(0.29f, 0.43f), at(0.71f, 0.475f), collar, 0.02f * logo);
+        dl->AddRectFilled(at(0.31f, 0.11f), at(0.69f, 0.43f), p.accent, 0.19f * logo, ImDrawFlags_RoundCornersTop);
     }
     ImGui::PushFont(fonts().semibold, 19.0f);
     dl->AddText(ImVec2(l1.x + 10.0f * sc, cy - ImGui::GetFontSize() * 0.55f), p.text, ECHO_APP_NAME);
