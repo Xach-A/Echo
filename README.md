@@ -3,7 +3,8 @@
 A free, open-source Windows 10/11 virtual audio mixer and real-time voice changer:
 multichannel mixing and routing, per-application capture, a 30-effect DSP library,
 neural background-noise suppression (on by default for microphones) and echo cancellation,
-pitch/formant voice changing, pitch correction ("autotune"), a soundboard, recording, and
+pitch/formant voice changing, pitch correction ("autotune") and a Studio Singer voice for
+singing, a soundboard, recording, and
 optional AI voices (RVC models, run on your PC). No accounts, subscriptions, ads or telemetry;
 Echo goes online only when you click Install VB-CABLE, Install the AI engine, Download
 ContentVec (the speech model RVC voices need) or Check for updates.

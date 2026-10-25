@@ -1286,6 +1286,58 @@ void cmdSoak(DeviceManager& dm, double seconds) {
 
 } // namespace
 
+// Runs a recording through a factory preset's chain as a mono microphone
+// input would (48 kHz, 10 ms blocks; widened to stereo where an effect needs
+// it) and writes the stereo result, 3 s longer for the tails.
+int presetRender(const std::string& name, const std::wstring& inWav, const std::wstring& outWav) {
+    const ChainPreset* preset = nullptr;
+    static const std::vector<ChainPreset> all = factoryChainPresets();
+    for (const auto& p : all)
+        if (p.name == name) preset = &p;
+    WavData w;
+    std::string err;
+    if (!preset || !readWav(inWav, w, &err)) {
+        std::printf("no preset '%s', or can't read the recording\n", name.c_str());
+        return 1;
+    }
+    std::vector<float> x(w.samples.size() / w.channels);
+    for (size_t i = 0; i < x.size(); ++i) x[i] = w.samples[i * w.channels];
+    if (w.sampleRate != 48000) x = resampleOffline(x, 1, w.sampleRate, 48000.0);
+    x.resize(x.size() + 3 * 48000, 0.0f);
+    auto chain = chainFromJson(preset->chain, nullptr);
+    ChainSnap snap;
+    for (auto& e : chain) {
+        e->prepare(48000.0, 480);
+        snap.fx[snap.count++] = e.get();
+    }
+    ChainRunner runner;
+    runner.prepare(480);
+    std::vector<float> l = x, r = x, out(x.size() * 2);
+    int latency = 0;
+    for (const auto& e : chain)
+        if (!e->bypass.load()) latency += e->latencySamples();
+    for (size_t pos = 0; pos < x.size(); pos += 480) {
+        const int n = static_cast<int>(std::min<size_t>(480, x.size() - pos));
+        bool mono = true;
+        runner.process(snap, l.data() + pos, r.data() + pos, mono, n);
+        if (mono) std::copy_n(l.data() + pos, n, r.data() + pos);
+    }
+    float peakOut = 0.0f;
+    for (size_t i = 0; i < x.size(); ++i) {
+        out[2 * i] = l[i];
+        out[2 * i + 1] = r[i];
+        peakOut = std::max({peakOut, std::fabs(l[i]), std::fabs(r[i])});
+    }
+    WavWriter ww;
+    if (!ww.open(outWav, 48000, 2, 16) || !ww.write(out.data(), x.size())) {
+        std::printf("can't write the output\n");
+        return 1;
+    }
+    ww.close();
+    std::printf("%s: %.1f s, delay %.1f ms, peak %.1f dBFS\n", name.c_str(), x.size() / 48000.0, latency / 48.0, gainToDb(peakOut));
+    return 0;
+}
+
 // Writes the factory presets as documented .echopreset files.
 int exportPresets(const std::wstring& dir) {
     std::error_code ec;
@@ -2198,6 +2250,7 @@ void cmdSoundboard(DeviceManager& dm) {
 int wmain(int argc, wchar_t** argv) {
     SetConsoleOutputCP(CP_UTF8);
     if (argc > 2 && std::wstring(argv[1]) == L"export-presets") return exportPresets(argv[2]);
+    if (argc > 4 && std::wstring(argv[1]) == L"preset-render") return presetRender(wideToUtf8(argv[2]), argv[3], argv[4]);
     ComScope com(COINIT_MULTITHREADED);
     if (argc > 3 && std::wstring(argv[1]) == L"decode") return decodeSound(argv[2], argv[3]);
     if (argc > 2 && std::wstring(argv[1]) == L"torch-info") return torchInfo(argv[2]);

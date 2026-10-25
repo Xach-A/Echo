@@ -2,7 +2,8 @@
 //
 // Analysis: YIN pitch detection every ~5 ms on a mono sum.
 // Decision: nearest note in the chosen key/scale, with correction strength,
-//   retune speed (time constant), transition smoothing, and vibrato.
+//   retune speed (time constant), transition smoothing, humanize (held notes
+//   corrected more slowly, so their natural movement stays), and vibrato.
 // Synthesis: pitch-synchronous overlap-add (TD-PSOLA). Analysis marks are
 //   placed one period apart and aligned to waveform peaks; grains two
 //   periods long are re-spaced at period/ratio. Grains are not resampled,
@@ -43,6 +44,8 @@ const ParamInfo kAtParams[] = {
     {"range", "Voice range", 0.0f, 3.0f, 1.0f, "", ParamScale::Enum, kRanges,
      "Narrower ranges track better and add less latency"},
     {"mix", "Mix", 0.0f, 100.0f, 100.0f, "%", ParamScale::Linear},
+    {"humanize", "Humanize", 0.0f, 100.0f, 0.0f, "%", ParamScale::Linear, nullptr,
+     "Held notes keep their natural movement (vibrato, swells); short notes still snap to the note"},
 };
 ECHO_EFFECT_INFO(kAtInfo, "autotune", "Pitch Correction (Autotune)", "Voice",
                  "Detects the sung pitch and corrects it toward the nearest note in a key and scale.", kAtParams,
@@ -108,6 +111,7 @@ protected:
         smoothMidi_ = -1.0;
         correction_ = 0.0;
         lastNote_ = -1000;
+        heldTime_ = 0.0;
         vibPhase_ = 0.0;
         voicedTime_ = 0.0;
         sinceHop_ = 0;
@@ -188,11 +192,19 @@ private:
             if (lastNote_ > -1000 && note != lastNote_ && music::noteAllowed(lastNote_, key, scale) &&
                 std::abs(smoothMidi_ - lastNote_) < 0.65)
                 note = lastNote_;
+            heldTime_ = note == lastNote_ ? heldTime_ + hopSec : 0.0;
             lastNote_ = note;
+            // Humanize: once a note has been held a moment (0.12 s, fully by
+            // 0.37 s) it is corrected more slowly (up to 0.3 s more), so a
+            // held note keeps its vibrato and swells while it stays centred
+            // on the note; quick notes and the start of each note keep the
+            // retune speed.
+            const double held = std::clamp((heldTime_ - 0.12) / 0.25, 0.0, 1.0) * p(12) / 100.0;
+            const double speedEff = speedMs + held * 300.0;
             const double desired = (note - smoothMidi_) * strength;
-            const double aR = speedMs <= 0.0f ? 0.0 : std::exp(-hopSec / (speedMs * 0.001));
+            const double aR = speedEff <= 0.0 ? 0.0 : std::exp(-hopSec / (speedEff * 0.001));
             correction_ = desired + aR * (correction_ - desired);
-            double semis = correction_ + (smoothMidi_ - midi) * strength * (speedMs <= 0.0f ? 1.0 : 0.0);
+            double semis = correction_ + (smoothMidi_ - midi) * strength * (speedMs <= 0.0f ? 1.0 - held : 0.0);
             // Vibrato fades in after 150 ms of continuous voicing.
             const double vibDepth = p(9) / 100.0 * std::min(1.0, std::max(0.0, (voicedTime_ - 0.15) / 0.3));
             vibPhase_ += p(8) * hopSec;
@@ -207,6 +219,7 @@ private:
             smoothMidi_ = -1.0;
             correction_ *= 0.5;
             lastNote_ = -1000;
+            heldTime_ = 0.0;
         }
         Track& t = track_[(trackHead_ + trackCount_) % kTrackCap];
         if (trackCount_ == kTrackCap) trackHead_ = (trackHead_ + 1) % kTrackCap;
@@ -323,7 +336,7 @@ private:
     double synNext_ = 0.0;
     int markHead_ = 0, markCount_ = 0, trackHead_ = 0, trackCount_ = 0;
     int hop_ = 256, tmax_ = 640, latency_ = 2176, range_ = 1, sinceHop_ = 0, numCh_ = 1;
-    double smoothMidi_ = -1.0, correction_ = 0.0, vibPhase_ = 0.0, voicedTime_ = 0.0;
+    double smoothMidi_ = -1.0, correction_ = 0.0, vibPhase_ = 0.0, voicedTime_ = 0.0, heldTime_ = 0.0;
     int lastNote_ = -1000;
 };
 

@@ -133,6 +133,39 @@ std::vector<ChainPreset> factoryChainPresets() {
                                   fx("compressor", {{"threshold", -22}, {"ratio", 4}, {"makeup", 5}}),
                                   fx("reverb", {{"decay", 1.4}, {"mix", 14}}),
                                   limiter})));
+    // A polished pop / R&B vocal (the kind of sound modern records are known
+    // for, not anyone's voice). Pitch is detected on the cleaned-up voice
+    // (rumble and mud filtered first), corrected toward the key with a quick
+    // retune and humanize (held notes keep their movement), then compressed,
+    // brightened, warmed by gentle parallel saturation and de-essed. Doubling
+    // is quiet; the harmony is off until chosen (it follows the key). Echo
+    // and a short plate-like reverb are mixed in, the dry voice stays in
+    // front. The Voices screen's Studio Singer panel finds its effects by the
+    // "ui" roles. Defaults chosen by measurement (tests/test_singer.cpp).
+    v.push_back(make("Studio Singer", "Pitch correction",
+                     "Polished pop/R&B singing: clearly tuned (set your song's key), full and even, with a little doubling, "
+                     "echo and plate reverb.",
+                     json::array({fx("filter", {{"hp_on", 1}, {"hp_freq", 90}, {"hp_slope", 1}}),
+                                  fx("eq", {{"b2_freq", 280}, {"b2_gain", -2.5}, {"b2_q", 1.0}, {"b3_freq", 550}, {"b3_gain", -1.5}, {"b3_q", 1.4}}),
+                                  withUi(fx("autotune", {{"key", 0}, {"scale", 0}, {"style", 2}, {"strength", 100}, {"speed", 18},
+                                                         {"smoothing", 12}, {"humanize", 35}, {"range", 1}}),
+                                         "singer"),
+                                  fx("compressor", {{"threshold", -24}, {"ratio", 3.5}, {"attack", 6}, {"release", 120}, {"knee", 6},
+                                                    {"auto_makeup", 1}, {"makeup", 1}}),
+                                  withUi(fx("eq", {{"b1_freq", 120}, {"b1_gain", 1}, {"b4_freq", 3200}, {"b4_gain", 2.5}, {"b4_q", 0.9},
+                                                   {"b6_freq", 11000}, {"b6_gain", 3}}),
+                                         "tone"),
+                                  withUi(fx("distortion", {{"type", 2}, {"drive", 8}, {"low_cut", 120}, {"tone", 12000}, {"output", -6.7}, {"mix", 30}}),
+                                         "saturation"),
+                                  fx("deesser", {{"freq", 6500}, {"threshold", -30}, {"reduction", 6}}),
+                                  fx("doubler", {{"detune", 9}, {"delay", 18}, {"width", 70}, {"level", -12}, {"dry", 0}}),
+                                  fxOff("harmonizer", {{"mode", 1}, {"key", 0}, {"scale", 1}, {"steps1", 2}, {"level1", -10}, {"pan1", -40},
+                                                       {"steps2", 4}, {"level2", -60}, {"pan2", 40}, {"dry", 0}}),
+                                  fx("delay", {{"time", 260}, {"feedback", 18}, {"mix", 10}, {"low_cut", 300}, {"high_cut", 5000}}),
+                                  fx("reverb", {{"decay", 1.3}, {"size", 0.65}, {"predelay", 28}, {"damping", 0.3}, {"diffusion", 0.9},
+                                                {"low_cut", 220}, {"width", 100}, {"mix", 16}}),
+                                  fx("gain", {{"gain", 0}}),
+                                  limiter})));
 
     // ---- Voice changer characters ----
     v.push_back(make("Deep Voice", "Voice changer",

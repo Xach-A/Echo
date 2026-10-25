@@ -113,6 +113,8 @@ void drawPitchGraph(Effect& fx, ImVec2 size) {
             dl->AddText(ImVec2(pos.x + 3, y - ImGui::GetFontSize() * 0.5f), p.textDim, lbl);
         }
     }
+    // Pitches outside the two octaves shown stay inside the graph.
+    dl->PushClipRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), true);
     if (hist.size() > 1) {
         const float dx = size.x / static_cast<float>(maxFrames);
         float x = pos.x + size.x - dx * hist.size();
@@ -135,6 +137,7 @@ void drawPitchGraph(Effect& fx, ImVec2 size) {
             x += dx;
         }
     }
+    dl->PopClipRect();
     dl->AddText(ImVec2(pos.x + size.x - ImGui::CalcTextSize("input  corrected").x - 6, pos.y + 3), p.textDim, "input");
     dl->AddText(ImVec2(pos.x + size.x - ImGui::CalcTextSize("corrected").x - 6, pos.y + 3), p.good, "corrected");
 }

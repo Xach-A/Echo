@@ -12,6 +12,9 @@ namespace {
 // ---------------------------------------------------------------------------
 // Delay / echo
 // ---------------------------------------------------------------------------
+// Echoes in time with a song: note lengths in beats (quarter notes).
+const char* const kSyncNames[] = {"Off (use Time)", "1/2", "1/4", "Dotted 1/8", "1/8", "1/8 triplet", "1/16", nullptr};
+constexpr float kSyncBeats[] = {0.0f, 2.0f, 1.0f, 0.75f, 0.5f, 1.0f / 3.0f, 0.25f};
 const ParamInfo kDelayParams[] = {
     {"time", "Time", 1.0f, 2000.0f, 320.0f, "ms", ParamScale::Log},
     {"feedback", "Feedback", 0.0f, 95.0f, 35.0f, "%", ParamScale::Linear},
@@ -19,6 +22,8 @@ const ParamInfo kDelayParams[] = {
     {"pingpong", "Ping-pong", 0.0f, 1.0f, 0.0f, "", ParamScale::Toggle, nullptr, "Echoes alternate left and right"},
     {"low_cut", "Low cut", 20.0f, 2000.0f, 150.0f, "Hz", ParamScale::Log, nullptr, "Filters the repeats"},
     {"high_cut", "High cut", 1000.0f, 20000.0f, 7000.0f, "Hz", ParamScale::Log, nullptr, "Darkens the repeats"},
+    {"sync", "Sync to tempo", 0.0f, 6.0f, 0.0f, "", ParamScale::Enum, kSyncNames, "A note length at the tempo below instead of Time"},
+    {"bpm", "Tempo", 40.0f, 240.0f, 100.0f, "BPM", ParamScale::Linear, nullptr, "Beats per minute of the song"},
 };
 ECHO_EFFECT_INFO(kDelayInfo, "delay", "Delay / Echo", "Time & Space",
                  "Stereo feedback delay with filtered repeats and ping-pong mode.", kDelayParams, true);
@@ -47,7 +52,9 @@ protected:
                 hc_[c].set(designBiquad(FilterType::LowPass, sr_, hcF_, 0.707));
             }
         }
-        const float targetTime = clampv(static_cast<float>(p(0) * 0.001 * sr_), 1.0f,
+        const int sync = clampv(pi(6), 0, 6);
+        const double timeMs = sync > 0 ? 60000.0 / std::max(1.0f, p(7)) * kSyncBeats[sync] : p(0);
+        const float targetTime = clampv(static_cast<float>(timeMs * 0.001 * sr_), 1.0f,
                                         static_cast<float>(line_[0].maxDelay() - 4));
         if (time_ < 0.0f) time_ = targetTime;
         const float fb = p(1) / 100.0f;

@@ -297,6 +297,7 @@ private:
     win::DownloadProgress updateProgress_;
     void drawUpdates();
     bool snapshotShowAi_ = false;
+    bool snapshotSingerMore_ = false; // snapshots: Studio Singer's More settings open
     // VB-CABLE: download VB-Audio's pack, then open its installer.
     struct VbCableJob {
         std::string error;

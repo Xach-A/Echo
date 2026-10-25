@@ -149,7 +149,7 @@ See `AI_VOICE.md`.
 | `voice_denoise` | strength, mix, vad_gate, vad_threshold, vad_hold, vad_range (default −60), clicks (typing & click removal, default on) |
 | `echo_cancel` | tail, suppression, rate (reference set on the strip) |
 | `denoise` | reduction, sensitivity, smoothing, learn_fast |
-| `delay` | time, feedback, mix, pingpong, low_cut, high_cut |
+| `delay` | time, feedback, mix, pingpong, low_cut, high_cut, sync (0 off: use time; 1/2, 1/4, dotted 1/8, 1/8, 1/8 triplet, 1/16), bpm |
 | `reverb` | decay, size, predelay, damping, diffusion, low_cut, width, mix |
 | `chorus` | rate, depth, delay, voices, spread, mix |
 | `flanger` | rate, depth, delay, feedback, stereo, mix |
@@ -161,8 +161,8 @@ See `AI_VOICE.md`.
 | `robot` | mode, pitch, output, mix |
 | `pitch` | semitones, cents, formant, preserve, quality, output, mix |
 | `pitch_lite` | semitones, cents, grain, mix |
-| `harmonizer` | interval1, level1, pan1, interval2, level2, pan2, dry |
+| `harmonizer` | interval1, level1, pan1, interval2, level2, pan2, dry, mode (0 semitones: interval1/2; 1 in key: steps1/2 along key/scale), key, scale, steps1, steps2 |
 | `doubler` | detune, delay, width, level, dry |
 | `octaver` | sub, up, dry |
-| `autotune` | key, scale, style, strength, speed, smoothing, reference, preserve, vib_rate, vib_depth, range, mix |
+| `autotune` | key, scale, style, strength, speed, smoothing, reference, preserve, vib_rate, vib_depth, range, mix, humanize |
 | `ai_voice` | pitch, mix, latency, index (Voice match), response (Quality: 0 Fastest, 1 Fast, 2 Balanced, 3 Smooth, 4 Smoothest; saved as "response", its name in Echo 0.1, where 0-2 meant Quicker, Balanced, Smoother); the model itself is selected in the UI |

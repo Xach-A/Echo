@@ -54,4 +54,15 @@ inline int nearestNote(double midi, int key, int scale) {
     return best;
 }
 
+// The note `steps` notes of the scale above (or, negative, below) an allowed
+// note: in a major key, 2 steps above the root is its third, 4 its fifth.
+inline int scaleStep(int note, int steps, int key, int scale) {
+    int n = note;
+    for (int s = 0; s < std::abs(steps); ++s) {
+        do n += steps > 0 ? 1 : -1;
+        while (!noteAllowed(n, key, scale));
+    }
+    return n;
+}
+
 } // namespace echo::music
