@@ -51,7 +51,7 @@ someone. RVC files carry no license information; Echo shows that.
 | Pitch | Moves your voice up or down (semitones) before the AI voice takes over. +12 suits a deep voice using a high voice's model. |
 | Voice match | Voices with an .index: how strongly the index pulls your speech towards the voice's own sound (0–100 %, default 50 %). |
 | Mix | Your plain voice vs the AI voice. |
-| Response | RVC voices: Quicker, Balanced (default) or Smoother. Quicker is heard sooner but can sound rougher; Smoother sounds cleaner but later. Changing it reloads the voice (a second or two of your plain voice). |
+| Quality | RVC voices: five steps from Fastest to Smoothest (default Balanced); the panel shows the delay of each. Smoother steps convert longer pieces and look a little further ahead, so they sound cleaner but reach the listener later. A new step reloads the voice once you let go of the slider (a second or two of your plain voice). |
 | Use the graphics card | Shown with the DirectML build of ONNX Runtime; on by default when the fastest card has its own memory (1 GB or more), since built-in graphics can be slower than the CPU. Echo picks the card Windows ranks fastest (on a laptop, the NVIDIA/AMD card rather than the built-in Intel one) and shows its name. Switching reloads the voice. |
 
 ## What works
@@ -67,24 +67,50 @@ someone. RVC files carry no license information; Echo shows that.
 ## Speed and delay
 
 An AI voice is always heard a little after you speak: Echo converts your
-voice in blocks, each with some of what you said before for context, and the
-newest part of each block only blends into the next one. Echo times the voice
-when it loads and sets the delay to leave room for converting a block; if a
-voice is too heavy, parts of your plain voice come through and the panel says
-so. The Response choice sets the block sizes:
+voice in pieces as you talk. Each run gives the voice up to 2 seconds of what
+you said before (the context), so it knows how the sentence goes, and leaves
+the newest bit (the lookahead) for the next run, so the part you hear isn't
+made at the very edge. Each new piece is lined up with the end of the last one
+before they are blended (SOLA, as RVC's own real-time mode does), so the joins
+don't cancel or flutter. Echo times the voice when it loads and sets the delay
+to leave room for converting a piece; if a voice is too heavy, parts of your
+plain voice come through and the panel says so.
 
-| Response | Block, context, blend | Delay, 12-core (24-thread) CPU | Delay, RTX 5070 Ti Laptop GPU | Difference to whole-file conversion (log-mel) |
+Only the newest part of each run goes through the voice's vocoder (the costly
+part), which makes the long context cheap on a graphics card. A PC that can't
+convert 2 s of context in time gets less (down to 0.4 s; the panel's delay
+shows the result). The Quality step sets the rest:
+
+| Quality | Piece, blend, lookahead | Delay, RTX 5070 Ti Laptop GPU | Delay, 12-core CPU (context it gets) | Difference to whole-file conversion, 2 voices (log-mel) |
 |---|---|---|---|---|
-| Quicker | 120, 250, 30 ms | 0.30 s (block converted in 0.77 of real time) | 0.24 s (0.19) | 6.6 dB |
-| Balanced (default) | 150, 300, 40 ms | 0.37 s (0.68 of real time) | 0.29 s (0.19) | 5.9 dB |
-| Smoother | 250, 400, 60 ms | 0.54 s (0.54 of real time) | 0.43 s (0.14) | 5.5 dB |
+| Fastest | 80, 20, 0 ms | 0.19 s | 0.25 s (0.4 s) | 5.1 / 5.6 dB |
+| Fast | 100, 30, 0 ms | 0.22 s | | 4.8 / 5.4 dB |
+| Balanced (default) | 120, 40, 20 ms | 0.28 s | 0.35 s (0.4 s) | 4.6 / 5.4 dB |
+| Smooth | 150, 40, 60 ms | 0.35 s | | 4.6 / 5.3 dB |
+| Smoothest | 200, 50, 100 ms | 0.47 s | 0.55 s (0.5 s) | 4.5 / 5.4 dB |
 
-All of these converted 12 s of speech in real time with no fallbacks to the
-plain voice (RVC v2 voice, 32 kHz). On the graphics card the delay is mostly
-the block itself plus a safety margin for the moments the PC is busy. For comparison, two whole-file conversions with different random
-noise differ by 2.6 dB. The Buffer setting (effects editor) only adds delay on
-top (default 100 ms, which is below what any voice needs, so it adds none);
-sessions saved with the old default of 400 are moved to 100.
+Measured with two 40 kHz RVC v2 voices from Hugging Face on 12 s and 10 s of
+speech, converted in real time with no fallbacks to the plain voice; on the
+graphics card each run took 15–27 ms. Two whole-file conversions with
+different random noise differ by 2.7 / 3.4 dB (the best any real-time setting
+can do). Before Echo 0.1.2 (0.25–0.4 s of context, plain blends) the same
+voices measured 6.4 / 7.2 dB at 0.24 s, 6.0 / 6.5 dB at 0.29 s and 5.3 / 6.3 dB
+at 0.43 s. On the CPU, Balanced measured 5.5 dB (Goku) at 0.35 s; the old
+Balanced measured 6.0 dB at 0.37 s.
+
+How the 2 s were chosen (Goku, 150 ms pieces): on continuous speech, longer
+context kept helping (0.3 s of context 6.0 dB, 0.6 s 5.5, 1 s 5.2, 2 s 4.7;
+on the second half of a 22 s recording 2 s 4.7, 4 s 4.5, 6 s 4.4), but not
+right after a pause: after 6 s of quiet, 0.5 s of context measured 5.8 dB,
+1 s 5.5, 2 s 5.2 and 3 s 5.2, and a context that was mostly silence (4–6 s
+long) measured far worse (6–9 dB). Digital silence and a quiet microphone
+before speaking measured the same with 2 s.
+
+The Buffer setting (effects editor) only adds delay on top (default 100 ms,
+which is below what any voice needs, so it adds none); sessions saved with the
+old default of 400 are moved to 100. Sessions saved with Response (Echo 0.1)
+move to the step in the same place: Quicker → Fast, Balanced → Balanced,
+Smoother → Smooth.
 
 Pitch comes from Echo's own pitch tracker (YIN), not RVC's neural pitch
 models (RMVPE, FCPE); octave mistakes on breathy or noisy speech are
@@ -96,16 +122,23 @@ Echo reads the .pth file itself (a PyTorch zip; the pickled settings are
 interpreted, never run) and builds the voice network as an ONNX graph for
 ONNX Runtime: the text encoder (6 transformer layers with relative
 positions), the normalizing flow run backwards, and the NSF HiFi-GAN vocoder.
-ContentVec is built the same way from its PyTorch weights. Per block:
+ContentVec is built the same way from its PyTorch weights. Per run:
 16 kHz audio → ContentVec features (50 a second) → blended towards the
 voice's index → doubled to 100 a second with the pitch of every 10 ms → the
-voice network → audio at the voice's rate.
+voice network → audio at the voice's rate. As in RVC's real-time mode, the
+text encoder reads the whole block, the flow runs on the newest frames plus
+the 24 it looks back on, and the vocoder makes only the newest frames (plus
+60 ms, its reach back, which is not played); the index is applied where the
+flow runs. The pitch of the audio a run shares with the last one is kept, so
+only the newest audio is tracked. The index is searched for all frames at once
+(the voice's cluster centres are read once per run, not once per frame).
 
 Tools (`echo_hwtest`): `torch-info <file>` lists a checkpoint;
-`rvc-convert <voice folder> <in.wav> <out.wav> [pitch] [match] [response 0-2]`
-converts a recording through the real-time effect (Quicker, Balanced,
-Smoother; default Balanced) and prints the delay; `rvc-offline` converts it in one
-piece; `faiss-info <index>` times retrieval.
+`rvc-convert <voice folder> <in.wav> <out.wav> [pitch] [match] [quality 0-4] [gpu 0/1] [piece context blend lookahead]`
+converts a recording through the real-time effect (default Balanced, on the
+CPU; the last four, in ms, replace the step's sizes) and prints the delay;
+`rvc-offline` converts it in one piece; `rvc-time <voice folder> <in.wav> <context ms> <piece ms> [gpu]`
+times each step of a run; `faiss-info <index>` times retrieval.
 
 ## Echo model packages (advanced)
 
@@ -149,8 +182,10 @@ Echo refuses manifests without a `license`. `consent` is shown in the UI.
 | `<pitch_input>` (optional) | float32 `[1]` | pitch shift in semitones |
 | `<output>` | float32 `[1, N]` | converted audio, same rate and length, time-aligned with the input |
 
-Echo uses the last `chunk` samples of each output (shifted back by the
-crossfade length) and crossfades successive chunks.
+Echo plays `chunk` samples of each output, ending the crossfade length plus
+up to 10 ms before its end: each is lined up with the end of the last
+(within those 10 ms, SOLA) and crossfaded with it. `context_ms` must be at
+least the crossfade plus 10 ms for the lining up.
 `tools/make_test_model.py` builds a contract-compliant test graph (a
 low-pass filter).
 

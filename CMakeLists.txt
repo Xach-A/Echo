@@ -6,7 +6,7 @@ set(ECHO_APP_ID "Echo" CACHE STRING "Identifier used for the settings folder and
 set(ECHO_APP_PUBLISHER "Echo contributors" CACHE STRING "Publisher shown in version info")
 set(ECHO_UPDATE_REPO "Xach-A/Echo" CACHE STRING "GitHub repository (owner/name) whose releases Echo checks for updates")
 
-project(Echo VERSION 0.1.1 LANGUAGES C CXX)
+project(Echo VERSION 0.1.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

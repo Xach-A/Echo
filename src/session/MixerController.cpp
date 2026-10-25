@@ -1061,6 +1061,18 @@ void MixerController::migrateSession() {
                 }
         dirty_ = true;
     }
+    if (session_.configVersion == 5) {
+        // The AI voice's Response (Quicker, Balanced, Smoother: 0-2, saved by
+        // every version 5 session) became Quality's five steps under the same
+        // name: each keeps its place (Fast, Balanced, Smooth).
+        for (auto& s : session_.strips)
+            for (auto& e : s.chain)
+                if (std::string(e->typeId()) == "ai_voice") {
+                    const int i = e->paramIndex("response");
+                    if (i >= 0) e->setParam(i, std::clamp(std::round(e->param(i)), 0.0f, 2.0f) + 1.0f);
+                }
+        dirty_ = true;
+    }
     if (session_.configVersion < 2) {
         // Noise suppression became a default part of microphone inputs. Add
         // it once to microphones of older sessions; afterwards the user's

@@ -1,5 +1,7 @@
 // Voice changer effects: high-quality pitch/formant shifter, low-latency
 // pitch shifter, harmonizer, doubler and octaver.
+#include "dsp/MusicTheory.h"
+#include "dsp/PitchDetector.h"
 #include "dsp/PitchShifter.h"
 #include "dsp/effects/EffectUtil.h"
 
@@ -132,8 +134,12 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// Harmonizer
+// Harmonizer. Semitones: fixed intervals. In key: each voice is a number of
+// notes of the key's scale away from the sung note (found by YIN every 5 ms,
+// as the nearest note of the scale), so a third is major or minor as the key
+// wants; the interval glides over about 15 ms when it changes.
 // ---------------------------------------------------------------------------
+const char* const kHarmModes[] = {"Semitones", "In key", nullptr};
 const ParamInfo kHarmParams[] = {
     {"interval1", "Voice 1 interval", -24.0f, 24.0f, 4.0f, "st", ParamScale::Int, nullptr, "+4 = major third, +7 = fifth"},
     {"level1", "Voice 1 level", -60.0f, 6.0f, -6.0f, "dB", ParamScale::Linear},
@@ -142,9 +148,16 @@ const ParamInfo kHarmParams[] = {
     {"level2", "Voice 2 level", -60.0f, 6.0f, -8.0f, "dB", ParamScale::Linear},
     {"pan2", "Voice 2 pan", -100.0f, 100.0f, 50.0f, "%", ParamScale::Linear},
     {"dry", "Dry level", -60.0f, 6.0f, 0.0f, "dB", ParamScale::Linear},
+    {"mode", "Intervals", 0.0f, 1.0f, 0.0f, "", ParamScale::Enum, kHarmModes,
+     "In key: steps along the key's scale, so the harmonies fit the song"},
+    {"key", "Key", 0.0f, 11.0f, 0.0f, "", ParamScale::Enum, music::kNoteNames},
+    {"scale", "Scale", 0.0f, 9.0f, 1.0f, "", ParamScale::Enum, music::kScaleNames},
+    {"steps1", "Voice 1 steps", -7.0f, 7.0f, 2.0f, "", ParamScale::Int, nullptr,
+     "In key: +2 = a third above, +4 = a fifth, -2 = a third below, -7 = an octave below (7-note scales)"},
+    {"steps2", "Voice 2 steps", -7.0f, 7.0f, 4.0f, "", ParamScale::Int},
 };
 ECHO_EFFECT_INFO(kHarmInfo, "harmonizer", "Harmonizer", "Voice",
-                 "Adds two pitch-shifted harmony voices (fixed intervals).", kHarmParams, true);
+                 "Adds two pitch-shifted harmony voices: fixed intervals, or in the song's key.", kHarmParams, true);
 
 class HarmonizerEffect final : public Effect {
 public:
@@ -153,13 +166,27 @@ public:
 protected:
     void onPrepare() override {
         for (auto& g : grain_) g.prepare(sr_, 0.08);
+        det_.prepare(sr_, 70.0, 900.0);
+        hop_ = std::max(64, static_cast<int>(std::lround(0.005 * sr_)));
+        glide_ = 1.0f - timeToCoeff(sr_, 0.015);
     }
     void onReset() override {
         for (auto& g : grain_) g.reset();
+        det_.reset();
+        sinceHop_ = 0;
+        lastNote_ = -1000;
+        // Until a note is heard: about the interval a 7-note scale gives.
+        for (int k = 0; k < 2; ++k) cur_[k] = target_[k] = std::round(pi(10 + k) * 12.0f / 7.0f);
     }
     void processImpl(float* const* ch, int numCh, int n) override {
         if (numCh < 2) return;
-        const float r1 = std::pow(2.0f, p(0) / 12.0f), r2 = std::pow(2.0f, p(3) / 12.0f);
+        const bool inKey = pi(7) == 1;
+        const int key = clampv(pi(8), 0, 11), scale = clampv(pi(9), 0, music::NumScales - 1);
+        if (!inKey) {
+            target_[0] = cur_[0] = p(0);
+            target_[1] = cur_[1] = p(3);
+        }
+        float r1 = std::pow(2.0f, cur_[0] / 12.0f), r2 = std::pow(2.0f, cur_[1] / 12.0f);
         const float l1 = dbToGain(p(1)), l2 = dbToGain(p(4)), dry = dbToGain(p(6));
         const float a1 = (p(2) / 100.0f + 1.0f) * kPi * 0.25f, a2 = (p(5) / 100.0f + 1.0f) * kPi * 0.25f;
         const float g1l = std::cos(a1) * l1, g1r = std::sin(a1) * l1;
@@ -167,6 +194,24 @@ protected:
         const float grain = 0.035f * static_cast<float>(sr_);
         for (int i = 0; i < n; ++i) {
             const float m = 0.5f * (ch[0][i] + ch[1][i]);
+            if (inKey) {
+                det_.push(m);
+                if (++sinceHop_ >= hop_) {
+                    sinceHop_ = 0;
+                    follow(key, scale);
+                }
+                bool moved = false;
+                for (int k = 0; k < 2; ++k)
+                    if (cur_[k] != target_[k]) {
+                        cur_[k] += (target_[k] - cur_[k]) * glide_;
+                        if (std::fabs(target_[k] - cur_[k]) < 1e-3f) cur_[k] = target_[k];
+                        moved = true;
+                    }
+                if (moved) {
+                    r1 = std::pow(2.0f, cur_[0] / 12.0f);
+                    r2 = std::pow(2.0f, cur_[1] / 12.0f);
+                }
+            }
             const float v1 = grain_[0].process(m, r1, grain);
             const float v2 = grain_[1].process(m, r2, grain * 1.13f);
             ch[0][i] = ch[0][i] * dry + v1 * g1l + v2 * g2l;
@@ -175,7 +220,24 @@ protected:
     }
 
 private:
+    // The sung note (nearest of the scale, held unless clearly another) and
+    // each voice's note that many steps along the scale from it. Unvoiced:
+    // the intervals stay.
+    void follow(int key, int scale) {
+        const PitchDetector::Result r = det_.analyze();
+        if (!r.voiced) return;
+        const double midi = music::hzToMidi(r.hz);
+        int note = music::nearestNote(midi, key, scale);
+        if (lastNote_ > -1000 && note != lastNote_ && music::noteAllowed(lastNote_, key, scale) && std::abs(midi - lastNote_) < 0.65)
+            note = lastNote_;
+        lastNote_ = note;
+        for (int k = 0; k < 2; ++k) target_[k] = static_cast<float>(music::scaleStep(note, pi(10 + k), key, scale) - note);
+    }
+
     GrainPitchShifter grain_[2];
+    PitchDetector det_;
+    int hop_ = 240, sinceHop_ = 0, lastNote_ = -1000;
+    float cur_[2] = {}, target_[2] = {}, glide_ = 0.0f;
 };
 
 // ---------------------------------------------------------------------------

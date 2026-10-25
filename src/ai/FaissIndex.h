@@ -20,6 +20,9 @@ public:
     // RVC's retrieval: the k nearest stored vectors (searching the nearest
     // `probe` clusters), weighted by 1 / distance^2, averaged into `out`.
     void retrieve(const float* query, int k, float* out, int probe = 1) const;
+    // The same for `count` queries ([count, dim], out likewise), much faster
+    // than one at a time: the centroids are read once for all of them.
+    void retrieveMany(const float* queries, int count, int k, float* out, int probe = 1) const;
 
 private:
     int dim_ = 0;

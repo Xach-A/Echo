@@ -142,6 +142,30 @@ TEST_CASE("ai: a model that does not match its manifest fails gracefully") {
     CHECK(l == x); // audio unaffected
 }
 
+TEST_CASE("ai: each piece is lined up with the last one before they blend (SOLA)") {
+    std::mt19937 rng(3);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    const int n = 1600, search = 400;
+    std::vector<float> sig(static_cast<size_t>(n + search));
+    for (float& v : sig) v = nd(rng);
+    // The last piece ended with the signal from sample s on: shift by s.
+    for (int s : {0, 37, 200, 333, 400}) {
+        const std::vector<float> tail(sig.begin() + s, sig.begin() + s + n);
+        CHECK(ai::solaOffset(sig, tail, search) == s);
+    }
+    // Silence, or a steady tone (about as good every period): no shift.
+    CHECK(ai::solaOffset(std::vector<float>(n + search, 0.0f), std::vector<float>(n, 0.0f), search) == search / 2);
+    std::vector<float> tone(static_cast<size_t>(n + search)), toneTail(static_cast<size_t>(n));
+    for (int i = 0; i < n + search; ++i) tone[static_cast<size_t>(i)] = static_cast<float>(std::sin(2 * kPiD * 440.0 * i / 40000.0));
+    for (int i = 0; i < n; ++i) toneTail[static_cast<size_t>(i)] = tone[static_cast<size_t>(i + search / 2)];
+    CHECK(ai::solaOffset(tone, toneTail, search) == search / 2);
+    // The Quality steps: each smoother step waits longer for a cleaner voice.
+    for (int q = 1; q < 5; ++q) {
+        const ai::StreamPlan a = ai::rvcStreamPlan(q - 1), b = ai::rvcStreamPlan(q);
+        CHECK(b.chunkMs + b.lookaheadMs + b.crossfadeMs > a.chunkMs + a.lookaheadMs + a.crossfadeMs);
+    }
+}
+
 TEST_CASE("ai: the selected model is saved with the effect's state") {
     ai::AiVoiceEffect e;
     CHECK(e.saveState().empty());

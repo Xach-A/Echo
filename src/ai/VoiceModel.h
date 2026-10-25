@@ -48,6 +48,10 @@ public:
     virtual const std::string& provider() const = 0;
     // How strongly the voice's index shapes the result (0..1; RVC only).
     virtual void setIndexRate(float) {}
+    // The next block is the last one moved on by this many samples (the new
+    // audio at its end), so work on the audio both share can be kept; 0: not
+    // related to the last (the first block, or after a gap).
+    virtual void setAdvance(int) {}
 };
 
 class OnnxVoiceModel : public VoiceConverter {

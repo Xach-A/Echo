@@ -675,7 +675,7 @@ TEST_CASE("noise suppression: a voice gate saved at the old -30 dB default moves
     CHECK(w.mc->session().configVersion == kSessionConfigVersion);
 }
 
-TEST_CASE("ai voice: a Buffer saved at the old 400 default drops to 100, a chosen one stays; Response starts Balanced") {
+TEST_CASE("ai voice: a Buffer saved at the old 400 default drops to 100, a chosen one stays; Quality starts Balanced") {
     World w;
     w.mc->createDefaultSession();
     Session& cur = w.mc->session();
@@ -683,7 +683,7 @@ TEST_CASE("ai voice: a Buffer saved at the old 400 default drops to 100, a chose
     auto second = w.mc->createEffect("ai_voice");
     REQUIRE(first);
     CHECK(first->param(first->paramIndex("latency")) == doctest::Approx(100.0f)); // the new default
-    CHECK(first->param(first->paramIndex("response")) == doctest::Approx(1.0f));  // Balanced
+    CHECK(first->param(first->paramIndex("response")) == doctest::Approx(2.0f));  // Quality: Balanced
     first->setParam("latency", 400.0f);  // the old default
     second->setParam("latency", 700.0f); // chosen by the user
     cur.strips[0].chain = {first};
@@ -697,7 +697,36 @@ TEST_CASE("ai voice: a Buffer saved at the old 400 default drops to 100, a chose
     const auto& b = w.mc->session().strips[1].chain[0];
     CHECK(a->param(a->paramIndex("latency")) == doctest::Approx(100.0f));
     CHECK(b->param(b->paramIndex("latency")) == doctest::Approx(700.0f));
+    CHECK(a->param(a->paramIndex("response")) == doctest::Approx(2.0f)); // saved before Response: Balanced
     CHECK(w.mc->session().configVersion == kSessionConfigVersion);
+}
+
+TEST_CASE("ai voice: Response saved by Echo 0.1 (Quicker, Balanced, Smoother) becomes Quality's Fast, Balanced, Smooth") {
+    World w;
+    w.mc->createDefaultSession();
+    Session& cur = w.mc->session();
+    std::vector<std::shared_ptr<Effect>> fx;
+    for (int r = 0; r < 3; ++r) {
+        fx.push_back(w.mc->createEffect("ai_voice"));
+        REQUIRE(fx.back());
+        fx.back()->setParam("response", static_cast<float>(r));
+        cur.strips[static_cast<size_t>(r)].chain = {fx.back()};
+    }
+    cur.configVersion = 5;
+    Session old;
+    std::vector<std::string> warn;
+    REQUIRE(sessionFromJson(sessionToJson(cur), old, &warn));
+    w.mc->replaceSession(std::move(old));
+    for (int r = 0; r < 3; ++r) {
+        const auto& e = w.mc->session().strips[static_cast<size_t>(r)].chain[0];
+        CHECK(e->param(e->paramIndex("response")) == doctest::Approx(static_cast<float>(r + 1)));
+    }
+    // Saved again and reopened: unchanged.
+    Session again;
+    REQUIRE(sessionFromJson(sessionToJson(w.mc->session()), again, &warn));
+    w.mc->replaceSession(std::move(again));
+    const auto& e = w.mc->session().strips[2].chain[0];
+    CHECK(e->param(e->paramIndex("response")) == doctest::Approx(3.0f));
 }
 
 TEST_CASE("virtual cables: a cable installed later is picked up by an unassigned virtual-mic bus") {

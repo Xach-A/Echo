@@ -42,18 +42,35 @@ class RvcVoice : public VoiceConverter {
 public:
     // Builds the networks for blocks of exactly `samples` samples at the
     // voice's rate (shorter or longer blocks are padded or cut). `encoder`:
-    // the ContentVec file (default: contentVecPath()).
-    bool load(const ModelManifest& m, bool preferGpu, int samples, std::string* error, const std::wstring& encoder = {});
+    // the ContentVec file (default: contentVecPath()). `decodeSamples`
+    // (0 = all): only the newest this many samples (whole 10 ms frames, at
+    // least) are made; the rest of the block is context, and run() leaves it
+    // silent in its output.
+    bool load(const ModelManifest& m, bool preferGpu, int samples, std::string* error, const std::wstring& encoder = {},
+              int decodeSamples = 0);
     bool run(const float* in, int n, float pitchSemis, std::vector<float>& out, std::string* error) override;
+    int decodedSamples() const { return decFrames_ * info_.hop; }
+    // How long the last run's steps took (seconds): the audio at 16 kHz,
+    // ContentVec, the index, the pitch, the voice network.
+    struct StepTimes {
+        double prep = 0.0, encoder = 0.0, index = 0.0, pitch = 0.0, voice = 0.0;
+    };
+    const StepTimes& lastTimes() const { return times_; }
     const std::string& provider() const override { return provider_; }
     void setIndexRate(float r) override { indexRate_ = r; }
+    // The pitch of the audio the blocks share is kept (only the new end is tracked).
+    void setAdvance(int samples) override { advance_ = samples; }
     bool hasIndex() const { return index_.loaded(); }
     void seed(unsigned s) { rng_.seed(s); }
     const RvcInfo& info() const { return info_; }
 
     // Pitch (Hz, 0 = unvoiced) of every 10 ms frame of 16 kHz audio,
-    // centred on frame i * 160.
-    static void trackPitch(const std::vector<float>& x16, int frames, std::vector<float>& f0);
+    // centred on frame i * 160. From `firstFrame` on only (f0 keeps the frames
+    // before it), starting the detector a few windows earlier.
+    static void trackPitch(const std::vector<float>& x16, int frames, std::vector<float>& f0, int firstFrame = 0);
+    // Frames before the newest audio whose pitch must be tracked again: the
+    // detector's window reaches that far (and the old end was padded).
+    static constexpr int kPitchReach = 7;
 
 private:
     RvcInfo info_;
@@ -64,9 +81,14 @@ private:
     int n16_ = 0;      // the block at 16 kHz
     int pad16_ = 0;    // padding at the end for the speech encoder
     int frames_ = 0;   // 10 ms frames
+    int decFrames_ = 0;  // the newest frames made into audio
+    int flowFrames_ = 0; // the newest frames the flow runs on
     int featFrames_ = 0;
     float indexRate_ = 0.5f;
+    int advance_ = 0;         // see setAdvance()
+    bool havePitch_ = false;  // f0_ holds the last block's pitch
     std::mt19937 rng_{12345};
+    StepTimes times_;
     std::vector<float> x16_, feats_, phone_, pitchf_, rnd_, noise_, f0_;
     std::vector<int64_t> pitch_;
 };

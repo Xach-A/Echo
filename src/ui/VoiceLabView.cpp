@@ -22,6 +22,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "session/Paths.h"
+#include "session/StudioSinger.h"
 #include "ui/App.h"
 #include "ui/EffectVisuals.h"
 #include "ui/Icons.h"
@@ -36,6 +37,7 @@ namespace {
 std::vector<ai::ModelManifest> g_models;
 bool g_modelsScanned = false;
 bool g_aiOpen = false;
+bool g_singerMore = false; // UI snapshot: Studio Singer's More settings open
 
 Effect* findEffect(StripModel& s, const char* type) {
     for (auto& e : s.chain)
@@ -53,6 +55,175 @@ int afterCleanup(const StripModel& s) {
     int pos = 0;
     while (pos < static_cast<int>(s.chain.size()) && isCleanup(*s.chain[pos])) ++pos;
     return pos;
+}
+
+// The n-th effect of a type that a voice put on the input.
+Effect* voiceEffect(StripModel& s, const std::string& voice, const std::string& type, int n = 0) {
+    for (auto& e : s.chain)
+        if (e->voice == voice && type == e->typeId() && n-- == 0) return e.get();
+    return nullptr;
+}
+
+float getp(const Effect& e, const char* id) {
+    const int i = e.paramIndex(id);
+    return i >= 0 ? e.param(i) : 0.0f;
+}
+
+void setp(Effect& e, const char* id, float v) {
+    const int i = e.paramIndex(id);
+    if (i >= 0) e.setParam(i, v);
+}
+
+void drawStudioSingerMore(Effect& at, Effect* toneEq, Effect* sat, Effect* comp, Effect* dbl, Effect* harm, Effect* dly, Effect* rev,
+                          Effect* out, int key, int scale);
+
+// The Studio Singer panel: key, autotune feel, reverb, echo and doubling up
+// front; the rest under More settings. Every control is a setting of one of
+// the voice's effects (session/StudioSinger.h), saved with the input.
+void drawStudioSinger(StripModel& s, const std::string& voice, const std::string& title, Effect& at, Effect* toneEq, Effect* sat) {
+    const float sc = uiScale();
+    const float w = ImGui::GetContentRegionAvail().x;
+    Effect* comp = voiceEffect(s, voice, "compressor");
+    Effect* dbl = voiceEffect(s, voice, "doubler");
+    Effect* harm = voiceEffect(s, voice, "harmonizer");
+    Effect* dly = voiceEffect(s, voice, "delay");
+    Effect* rev = voiceEffect(s, voice, "reverb");
+    Effect* out = voiceEffect(s, voice, "gain");
+    char v[64];
+    pop::CardTitle(title.c_str());
+
+    // Key and scale (the harmony voices follow them too).
+    const float half = (w - 10.0f * sc) * 0.5f;
+    int key = static_cast<int>(getp(at, "key")), scale = static_cast<int>(getp(at, "scale"));
+    const float rowY = ImGui::GetCursorPosY();
+    ImGui::BeginGroup();
+    pop::Label("Key");
+    ImGui::SetNextItemWidth(half * 0.6f);
+    const bool keyChanged = ImGui::Combo("##sgkey", &key, music::kNoteNames, 12);
+    ImGui::EndGroup();
+    ImGui::SameLine();
+    ImGui::SetCursorPosY(rowY);
+    ImGui::BeginGroup();
+    pop::Label("Scale");
+    ImGui::SetNextItemWidth(half * 1.4f);
+    const bool scaleChanged = ImGui::Combo("##sgscale", &scale, music::kScaleNames, music::NumScales);
+    ImGui::EndGroup();
+    if (keyChanged || scaleChanged) singer::setKey(at, harm, key, scale);
+    pop::Hint("Pick your song's key for the most polished sound. Chromatic fits any song.");
+
+    float feel = singer::tuneFeel(at);
+    if (pop::SliderRow("Autotune", singer::tuneFeelName(feel), "##sgfeel", &feel, 0.0f, 100.0f, 70.0f, w))
+        singer::setTuneFeel(at, std::round(feel));
+    pop::Hint("Natural keeps your own slides between notes; Robotic snaps every note, the classic hard-tune sound.");
+    if (rev) {
+        float mix = getp(*rev, "mix");
+        std::snprintf(v, sizeof(v), "%.0f%%", mix);
+        if (pop::SliderRow("Reverb", v, "##sgrev", &mix, 0.0f, 40.0f, 16.0f, w)) setp(*rev, "mix", std::round(mix));
+    }
+    if (dly) {
+        float mix = getp(*dly, "mix");
+        std::snprintf(v, sizeof(v), "%.0f%%", mix);
+        if (pop::SliderRow("Echo", v, "##sgecho", &mix, 0.0f, 35.0f, 10.0f, w)) setp(*dly, "mix", std::round(mix));
+    }
+    if (dbl) {
+        bool on = !dbl->bypass.load();
+        if (pop::SwitchRow("Doubling", "A second, slightly different you, for a fuller sound", &on, false)) dbl->bypass = !on;
+    }
+    drawPitchGraph(at, ImVec2(w, 120.0f * sc));
+
+    ImGui::Dummy(ImVec2(0, 4.0f * sc));
+    if (g_singerMore) ImGui::SetNextItemOpen(true, ImGuiCond_Always); // UI snapshot
+    if (!ImGui::TreeNode("More Studio Singer settings")) return;
+    drawStudioSingerMore(at, toneEq, sat, comp, dbl, harm, dly, rev, out, key, scale);
+    ImGui::TreePop();
+}
+
+// Under More settings: tuning detail, tone, dynamics, space, doubling,
+// harmony and the output level.
+void drawStudioSingerMore(Effect& at, Effect* toneEq, Effect* sat, Effect* comp, Effect* dbl, Effect* harm, Effect* dly, Effect* rev,
+                          Effect* out, int key, int scale) {
+    const float w = ImGui::GetContentRegionAvail().x;
+    char v[64];
+    float strength = getp(at, "strength");
+    std::snprintf(v, sizeof(v), "%.0f%%", strength);
+    if (pop::SliderRow("Correction strength", v, "##sgstr", &strength, 0.0f, 100.0f, 100.0f, w)) setp(at, "strength", std::round(strength));
+    float human = getp(at, "humanize");
+    std::snprintf(v, sizeof(v), "%.0f%%", human);
+    if (pop::SliderRow("Humanize", v, "##sghum", &human, 0.0f, 100.0f, 35.0f, w)) setp(at, "humanize", std::round(human));
+    pop::Hint("Held notes keep their natural vibrato; quick notes still land on the note.");
+    int range = static_cast<int>(getp(at, "range"));
+    const char* ranges[] = {"Low", "Mid", "High", "Wide"};
+    pop::Label("Voice range");
+    if (pop::Segmented("##sgrange", &range, ranges, 4, w)) setp(at, "range", static_cast<float>(range));
+    Tip("Low: bass voices. Mid: most men and women. High: high voices. Wide: every voice, a little later.");
+    if (toneEq) {
+        float t = singer::tone(*toneEq);
+        std::snprintf(v, sizeof(v), "%s", t < -5.0f ? "Darker" : t > 5.0f ? "Brighter" : "Neutral");
+        if (pop::SliderRow("Tone", v, "##sgtone", &t, -100.0f, 100.0f, 0.0f, w)) singer::setTone(*toneEq, std::round(t));
+    }
+    if (comp) {
+        float c = singer::compression(*comp);
+        if (pop::SliderRow("Compression", c < 30.0f ? "Light" : c < 70.0f ? "Medium" : "Heavy", "##sgcomp", &c, 0.0f, 100.0f, 50.0f, w))
+            singer::setCompression(*comp, std::round(c));
+        pop::Hint("Keeps quiet and loud lines closer in level.");
+    }
+    if (sat) {
+        float a = singer::saturation(*sat);
+        if (pop::SliderRow("Saturation", a < 5.0f ? "Off" : a < 45.0f ? "Warm" : a < 75.0f ? "Rich" : "Gritty", "##sgsat", &a, 0.0f, 100.0f,
+                           33.0f, w))
+            singer::setSaturation(*sat, std::round(a));
+    }
+    if (rev) {
+        float d = getp(*rev, "decay");
+        std::snprintf(v, sizeof(v), "%.1f s", d);
+        if (pop::SliderRow("Reverb length", v, "##sgdecay", &d, 0.4f, 3.0f, 1.3f, w)) setp(*rev, "decay", std::round(d * 10.0f) / 10.0f);
+        if (g_singerMore) ImGui::ScrollToItem(ImGuiScrollFlags_AlwaysCenterY); // UI snapshot: these settings in view
+    }
+    if (dly) {
+        static const char* const syncs[] = {"Free", "1/2", "1/4", "Dotted 1/8", "1/8", "1/8 triplet", "1/16"};
+        int sync = static_cast<int>(getp(*dly, "sync"));
+        pop::Label("Echo timing");
+        ImGui::SetNextItemWidth(w);
+        if (ImGui::Combo("##sgsync", &sync, syncs, 7)) setp(*dly, "sync", static_cast<float>(sync));
+        if (sync == 0) {
+            float t = getp(*dly, "time") / 1000.0f;
+            std::snprintf(v, sizeof(v), "%.2f s", t);
+            if (pop::SliderRow("Echo time", v, "##sgtime", &t, 0.06f, 0.8f, 0.26f, w)) setp(*dly, "time", std::round(t * 100.0f) * 10.0f);
+        } else {
+            float bpm = getp(*dly, "bpm");
+            std::snprintf(v, sizeof(v), "%.0f BPM", bpm);
+            if (pop::SliderRow("Song tempo", v, "##sgbpm", &bpm, 60.0f, 180.0f, 100.0f, w)) setp(*dly, "bpm", std::round(bpm));
+        }
+        float fb = getp(*dly, "feedback");
+        std::snprintf(v, sizeof(v), "%.0f%%", fb);
+        if (pop::SliderRow("Echo repeats", v, "##sgfb", &fb, 0.0f, 60.0f, 18.0f, w)) setp(*dly, "feedback", std::round(fb));
+    }
+    if (dbl && !dbl->bypass.load()) {
+        float lvl = getp(*dbl, "level");
+        std::snprintf(v, sizeof(v), "%.0f dB", lvl);
+        if (pop::SliderRow("Doubling level", v, "##sgdbl", &lvl, -24.0f, 0.0f, -12.0f, w)) setp(*dbl, "level", std::round(lvl));
+        float width = getp(*dbl, "width");
+        std::snprintf(v, sizeof(v), "%.0f%%", width);
+        if (pop::SliderRow("Doubling width", v, "##sgwidth", &width, 0.0f, 100.0f, 70.0f, w)) setp(*dbl, "width", std::round(width));
+    }
+    if (harm) {
+        int h = static_cast<int>(singer::harmony(*harm));
+        const char* names[static_cast<int>(singer::Harmony::Count)];
+        for (int i = 0; i < static_cast<int>(singer::Harmony::Count); ++i) names[i] = singer::harmonyName(static_cast<singer::Harmony>(i));
+        pop::Label("Harmony");
+        ImGui::SetNextItemWidth(w);
+        if (ImGui::Combo("##sgharm", &h, names, static_cast<int>(singer::Harmony::Count)))
+            singer::setHarmony(*harm, static_cast<singer::Harmony>(h), key, scale);
+        pop::Hint(scale == 0 ? "Extra voices singing with you, quieter. With Chromatic they keep fixed intervals; pick your key for "
+                               "harmonies that fit the song."
+                             : "Extra voices singing with you, quieter, on the notes of your key.");
+    }
+    if (out) {
+        float g = getp(*out, "gain");
+        std::snprintf(v, sizeof(v), "%+.1f dB", g);
+        if (pop::SliderRow("Output", v, "##sgout", &g, -12.0f, 6.0f, 0.0f, w)) setp(*out, "gain", std::round(g * 2.0f) / 2.0f);
+        pop::Hint("The voice's final level; its limiter keeps peaks under -1 dBFS.");
+    }
 }
 
 std::string signedText(float v, const char* unit) {
@@ -91,7 +262,7 @@ const char* presetIcon(const std::string& name) {
     if (has("Deep") || has("Monster") || has("Giant") || has("Masculine") || has("Octave")) return ICON_DOWN;
     if (has("Chipmunk") || has("Child") || has("Feminine")) return ICON_UP;
     if (has("Radio") || has("Telephone") || has("Walkie") || has("Megaphone") || has("Stadium") || has("DJ")) return ICON_SPEAKERS;
-    if (has("Autotune") || has("Correction") || has("Harmony") || has("Doubled")) return ICON_TONE;
+    if (has("Autotune") || has("Correction") || has("Singer") || has("Harmony") || has("Doubled")) return ICON_TONE;
     if (has("Cave") || has("Cathedral") || has("Underwater")) return ICON_AUDIO;
     if (has("Gaming")) return ICON_HEADPHONES;
     return ICON_MIC;
@@ -293,11 +464,35 @@ void EchoApp::drawVoiceLab() {
     };
     const bool hasDistortion = clip || crush;
 
+    // Studio Singer's own panel: its preset marks its autotune "singer", its
+    // tone EQ "tone" and its saturation "saturation".
+    Effect* singerAt = nullptr;
+    Effect* singerTone = nullptr;
+    Effect* singerSat = nullptr;
+    std::string singerVoice;
+    for (const std::string& voiceName : target->voices) {
+        const ChainPreset* pr = presets_.find(voiceName);
+        if (!pr || singerAt) continue;
+        for (size_t i = 0; i < pr->chain.size(); ++i) {
+            const json& fx = pr->chain[i];
+            const std::string type = fx.value("type", ""), ui = fx.value("ui", "");
+            int n = 0;
+            for (size_t k = 0; k < i; ++k) n += pr->chain[k].value("type", "") == type;
+            if (ui == "singer") singerAt = voiceEffect(*target, voiceName, type, n);
+            else if (ui == "tone") singerTone = voiceEffect(*target, voiceName, type, n);
+            else if (ui == "saturation") singerSat = voiceEffect(*target, voiceName, type, n);
+        }
+        if (singerAt) singerVoice = voiceName;
+    }
+
     pop::BeginCard("##tune");
     Effect* pitch = findEffect(*target, "pitch");
     Effect* tune = findEffect(*target, "autotune");
     const std::string label = voiceLabel(*target);
-    if (pitch) {
+    if (singerAt) {
+        if (snapshotIndex_ >= 0) g_singerMore = snapshotSingerMore_;
+        drawStudioSinger(*target, singerVoice, mixLabel, *singerAt, singerTone, singerSat);
+    } else if (pitch) {
         pop::CardTitle(("Pitch & formant · " + (mixLabel.empty() ? std::string("Custom") : mixLabel)).c_str());
         float st = pitch->param(0);
         if (pop::SliderRow("Pitch", signedText(st, "semitones").c_str(), "##pitch", &st, -24.0f, 24.0f, 0.0f))
@@ -672,11 +867,23 @@ void EchoApp::drawAiPanel(StripModel& strip) {
     if (pop::SliderRow("Mix", v, "##aimix", &mix, 0.0f, 100.0f, 100.0f, w)) aiFx->setParam(1, mix);
     const int rx = aiFx->paramIndex("response");
     if (rx >= 0 && aiFx->modelKind() == "rvc") {
-        const char* rs[] = {"Quicker", "Balanced", "Smoother"};
-        int r = static_cast<int>(std::lround(aiFx->param(rx)));
-        pop::Label("Response");
-        if (pop::Segmented("##airesponse", &r, rs, 3, w)) aiFx->setParam(rx, static_cast<float>(r));
-        pop::Hint("Quicker: you're heard sooner, but the voice can sound rougher. Smoother: cleaner, but later.");
+        static const char* const names[] = {"Fastest", "Fast", "Balanced", "Smooth", "Smoothest"};
+        float q = aiFx->param(rx);
+        const int step = std::clamp(static_cast<int>(std::lround(q)), 0, 4);
+        // The delay: as measured once this step is loaded, estimated before.
+        const double sr = mc_->engine().sampleRate();
+        double delay = 0.0;
+        if (st == ai::AiStatus::Running && aiFx->loadedQuality.load() == step && sr > 0.0) {
+            delay = aiFx->latencySamples() / sr;
+        } else {
+            const ai::StreamPlan pl = ai::rvcStreamPlan(step);
+            const double runMs = aiFx->inferenceMs.load();
+            delay = (pl.chunkMs + std::max(pl.chunkMs * 0.25 + 60.0, 1.5 * runMs + 30.0) + pl.lookaheadMs + pl.crossfadeMs + 5.0) / 1000.0;
+        }
+        char qv[64];
+        std::snprintf(qv, sizeof(qv), "%s · about %.2f s", names[step], delay);
+        if (pop::SliderRow("Quality", qv, "##aiquality", &q, 0.0f, 4.0f, 2.0f, w)) aiFx->setParam(rx, std::round(q));
+        pop::Hint("Smoother sounds cleaner, but you're heard a little later. Each step reloads the voice.");
     }
     if (rt.hasGpu()) {
         bool gpu = aiFx->prefersGpu();

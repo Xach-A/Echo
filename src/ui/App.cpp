@@ -655,6 +655,8 @@ void EchoApp::snapshotStep() {
         {"voices", -1, Page::Voices, SettingsTab::Audio, nullptr, false},
         {"voices-autotune", -1, Page::Voices, SettingsTab::Audio, "Hard Autotune", false},
         {"voices-pain", -1, Page::Voices, SettingsTab::Audio, "Pain", false},
+        {"voices-singer", -1, Page::Voices, SettingsTab::Audio, "Studio Singer", false},
+        {"voices-singer-more", -1, Page::Voices, SettingsTab::Audio, "Studio Singer", false},
         {"voices-mix", -1, Page::Voices, SettingsTab::Audio, nullptr, false},
         {"soundboard", -1, Page::Soundboard, SettingsTab::Audio, nullptr, false},
         {"mixer", -1, Page::Mixer, SettingsTab::Audio, "Deep Voice", false},
@@ -737,6 +739,7 @@ void EchoApp::snapshotStep() {
             update_.release.installerName = "Echo-0.2.0-setup-win64.exe";
             update_.release.notes = "**Highlights**\n- Voices are found in downloaded folders as they are\n- Check for updates in Settings > About";
         }
+        snapshotSingerMore_ = std::strcmp(st.file, "voices-singer-more") == 0;
         snapshotShowAi_ = std::strcmp(st.file, "voices-ai") == 0 || std::strcmp(st.file, "voices-ai-setup") == 0;
         snapshotNoOrt_ = std::strcmp(st.file, "voices-ai-setup") == 0;
         if (std::strcmp(st.file, "home-dark") == 0) {

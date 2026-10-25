@@ -1,0 +1,160 @@
+{
+  "category": "Pitch correction",
+  "chain": [
+    {
+      "bypass": false,
+      "params": {
+        "hp_freq": 90,
+        "hp_on": 1,
+        "hp_slope": 1
+      },
+      "type": "filter"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "b2_freq": 280,
+        "b2_gain": -2.5,
+        "b2_q": 1.0,
+        "b3_freq": 550,
+        "b3_gain": -1.5,
+        "b3_q": 1.4
+      },
+      "type": "eq"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "humanize": 35,
+        "key": 0,
+        "range": 1,
+        "scale": 0,
+        "smoothing": 12,
+        "speed": 18,
+        "strength": 100,
+        "style": 2
+      },
+      "type": "autotune",
+      "ui": "singer"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "attack": 6,
+        "auto_makeup": 1,
+        "knee": 6,
+        "makeup": 1,
+        "ratio": 3.5,
+        "release": 120,
+        "threshold": -24
+      },
+      "type": "compressor"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "b1_freq": 120,
+        "b1_gain": 1,
+        "b4_freq": 3200,
+        "b4_gain": 2.5,
+        "b4_q": 0.9,
+        "b6_freq": 11000,
+        "b6_gain": 3
+      },
+      "type": "eq",
+      "ui": "tone"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "drive": 8,
+        "low_cut": 120,
+        "mix": 30,
+        "output": -6.7,
+        "tone": 12000,
+        "type": 2
+      },
+      "type": "distortion",
+      "ui": "saturation"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "freq": 6500,
+        "reduction": 6,
+        "threshold": -30
+      },
+      "type": "deesser"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "delay": 18,
+        "detune": 9,
+        "dry": 0,
+        "level": -12,
+        "width": 70
+      },
+      "type": "doubler"
+    },
+    {
+      "bypass": true,
+      "params": {
+        "dry": 0,
+        "key": 0,
+        "level1": -10,
+        "level2": -60,
+        "mode": 1,
+        "pan1": -40,
+        "pan2": 40,
+        "scale": 1,
+        "steps1": 2,
+        "steps2": 4
+      },
+      "type": "harmonizer"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "feedback": 18,
+        "high_cut": 5000,
+        "low_cut": 300,
+        "mix": 10,
+        "time": 260
+      },
+      "type": "delay"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "damping": 0.3,
+        "decay": 1.3,
+        "diffusion": 0.9,
+        "low_cut": 220,
+        "mix": 16,
+        "predelay": 28,
+        "size": 0.65,
+        "width": 100
+      },
+      "type": "reverb"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "gain": 0
+      },
+      "type": "gain"
+    },
+    {
+      "bypass": false,
+      "params": {
+        "ceiling": -1.0
+      },
+      "type": "limiter"
+    }
+  ],
+  "description": "Polished pop/R&B singing: clearly tuned (set your song's key), full and even, with a little doubling, echo and plate reverb.",
+  "format": "echo.chain-preset",
+  "name": "Studio Singer",
+  "version": 1
+}
