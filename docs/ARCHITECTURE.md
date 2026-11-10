@@ -227,9 +227,25 @@ Voice-specific processing:
 * **Low-latency shifter / harmonizer / doubler / octaver**: two-tap granular
   shifter with WSOLA-style correlation alignment at grain restarts.
 * **Pitch correction**: YIN detection on a decimated signal with full-rate
-  refinement, key/scale snapping with hysteresis, retune speed, transition
-  smoothing, vibrato, natural/hard/custom styles, and TD-PSOLA resynthesis
-  (formants preserved, or resampled grains when preservation is off).
+  refinement, as a tracker: the last period is the detector's prior (the dip
+  nearest it wins unless another is clearly deeper; a dip at two to four times
+  a strong shorter one counts as that one's multiple, so a strong second
+  harmonic can't drop the pitch an octave and a real leap is still followed),
+  and up to two missed frames inside a note keep the last pitch. The sung
+  pitch is split into its centre (two one-pole stages: quick at a note's
+  start, then 90 ms each, below vibrato rates) and the movement around it.
+  The note is the nearest of the key's scale to the centre, held unless the
+  centre is 0.6 semitone from it (vibrato can't flip it); a move of more
+  than 0.7 semitone for 16 ms makes the centre quick again (legato notes).
+  Retune speed pulls the centre onto the note (humanize slows it on held
+  notes); the movement around it passes as sung at a note's start and is
+  scaled by Natural vibrato once held (retune under 12 ms flattens it).
+  TD-PSOLA resynthesis: analysis marks one period apart, each where a period
+  around it best matches the period around the last mark, to a fraction of a
+  sample (parabolic peak of the correlation); grains of two periods read with
+  cubic interpolation, re-spaced at period/ratio, normalised by the actual
+  sum of their windows (formants preserved, or resampled grains when
+  preservation is off).
 
 ## 10. AI voice pipeline
 

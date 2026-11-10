@@ -28,6 +28,13 @@ public:
         silenceDb_ = silenceDb;
     }
 
+    // Tracking: the period (full-rate samples) found last, 0 = none. With
+    // one, analyze() prefers the dip nearest it (an octave away costs as
+    // much as 0.15 more CMNDF), so a strong second harmonic or a breath can't
+    // make the pitch jump an octave; a real leap up still wins, since a dip
+    // at two to four times a strong dip is taken for that dip's multiple.
+    void setPrior(float periodSamples) { prior_ = periodSamples; }
+
     // Feed full-rate audio continuously.
     void push(const float* x, int n);
     void push(float x);
@@ -44,7 +51,7 @@ private:
     double sr_ = 48000.0, fsd_ = 12000.0, minHz_ = 60.0, maxHz_ = 1000.0;
     int dec_ = 4, decPhase_ = 0;
     int tauMin_ = 12, tauMax_ = 200, win_ = 300;
-    float threshold_ = 0.15f, silenceDb_ = -55.0f;
+    float threshold_ = 0.15f, silenceDb_ = -55.0f, prior_ = 0.0f;
     Biquad aa_[2];
     std::vector<float> decBuf_;   // circular, decimated
     int decPos_ = 0;

@@ -322,11 +322,15 @@ bool EchoApp::setVoices(StripModel& s, std::vector<std::string> voices, bool exc
     // A newer choice replaces one still waiting for old effects to fade out.
     for (auto& pv : pendingVoices_)
         if (pv.strip == s.id) pv.replan = false;
-    VoicePlan plan = planVoices(s.chain, voices, exclusive, find, fadingEffects(s.id));
+    VoiceMemory& memory = mc_->session().voiceSettings;
+    VoicePlan plan = planVoices(s.chain, voices, exclusive, find, fadingEffects(s.id), &memory);
     if (!plan.error.empty()) {
         toast(plan.error, 2);
         return false;
     }
+    // Voices taken off keep their settings for the next time they're picked.
+    for (const auto& [voice, settings] : plan.remember) memory[voice] = settings;
+    if (!plan.remember.empty()) mc_->markDirty();
     // Effects brought back while fading out are no longer removed.
     for (auto& pv : pendingVoices_)
         for (const auto& e : plan.revived) pv.remove.erase(std::remove(pv.remove.begin(), pv.remove.end(), e), pv.remove.end());
@@ -341,7 +345,7 @@ bool EchoApp::setVoices(StripModel& s, std::vector<std::string> voices, bool exc
         for (const auto& e : plan.revived) e->bypass = false;
         std::vector<std::shared_ptr<Effect>> chain = without(plan.chain, plan.fading);
         if (plan.deferred) {
-            VoicePlan again = planVoices(chain, plan.voices, exclusive, find, {});
+            VoicePlan again = planVoices(chain, plan.voices, exclusive, find, {}, &memory);
             if (!again.error.empty() || again.deferred) {
                 toast(again.error.empty() ? "That's too many effects for one input." : again.error, 2);
                 return false;
@@ -657,6 +661,7 @@ void EchoApp::snapshotStep() {
         {"voices-pain", -1, Page::Voices, SettingsTab::Audio, "Pain", false},
         {"voices-singer", -1, Page::Voices, SettingsTab::Audio, "Studio Singer", false},
         {"voices-singer-more", -1, Page::Voices, SettingsTab::Audio, "Studio Singer", false},
+        {"voices-singer-settings", -1, Page::Voices, SettingsTab::Audio, "Studio Singer", false},
         {"voices-mix", -1, Page::Voices, SettingsTab::Audio, nullptr, false},
         {"soundboard", -1, Page::Soundboard, SettingsTab::Audio, nullptr, false},
         {"mixer", -1, Page::Mixer, SettingsTab::Audio, "Deep Voice", false},
@@ -740,6 +745,7 @@ void EchoApp::snapshotStep() {
             update_.release.notes = "**Highlights**\n- Voices are found in downloaded folders as they are\n- Check for updates in Settings > About";
         }
         snapshotSingerMore_ = std::strcmp(st.file, "voices-singer-more") == 0;
+        snapshotSingerSettings_ = std::strcmp(st.file, "voices-singer-settings") == 0;
         snapshotShowAi_ = std::strcmp(st.file, "voices-ai") == 0 || std::strcmp(st.file, "voices-ai-setup") == 0;
         snapshotNoOrt_ = std::strcmp(st.file, "voices-ai-setup") == 0;
         if (std::strcmp(st.file, "home-dark") == 0) {
@@ -840,6 +846,75 @@ BusModel* EchoApp::firstBus(BusKind kind) {
 
 void EchoApp::applyVoice(StripModel& s, const ChainPreset* p) {
     setVoices(s, p ? std::vector<std::string>{p->name} : std::vector<std::string>{}, true);
+}
+
+void EchoApp::resetVoices(StripModel& s) {
+    Session& session = mc_->session();
+    for (const std::string& v : s.voices) {
+        session.voiceSettings.erase(v);
+        const ChainPreset* p = presets_.find(v);
+        if (!p) continue;
+        if (resetVoiceEffects(s.chain, v, *p)) continue;
+        // Its effects were changed in the effects editor: the preset's
+        // effects again, where the old ones were.
+        std::vector<std::shared_ptr<Effect>> chain;
+        bool placed = false;
+        for (const auto& e : s.chain) {
+            if (e->voice != v || isCleanupEffect(*e)) {
+                chain.push_back(e);
+                continue;
+            }
+            if (placed) continue;
+            placed = true;
+            for (auto& fresh : chainFromJson(p->chain, nullptr))
+                if (!isCleanupEffect(*fresh)) {
+                    fresh->voice = v;
+                    chain.push_back(fresh);
+                }
+        }
+        mc_->setChain(ChainTarget{false, s.id}, std::move(chain));
+    }
+    mc_->markDirty();
+    toast(s.voices.size() == 1 ? s.voices[0] + ": back to its own settings" : "Voices back to their own settings", 1);
+}
+
+bool EchoApp::saveVoicePreset(StripModel& s, const std::string& name, const std::string& description) {
+    // The input's voice as it sounds now: every effect but its cleanup, each
+    // keeping its Voices-screen role.
+    json chain = json::array();
+    for (const auto& e : s.chain)
+        if (!isCleanupEffect(*e)) chain.push_back(effectToJson(*e));
+    for (auto& fx : chain) fx.erase("voice");
+    std::string err;
+    if (chain.empty()) err = "This input has no voice effects to save.";
+    else if (presets_.saveUser(name, "User", description, chain, &err)) {
+        toast("Saved '" + name + "' (under Your presets)", 1);
+        return true;
+    }
+    toast("Couldn't save: " + err, 3);
+    return false;
+}
+
+void EchoApp::renameUserPreset(const std::string& from, const std::string& to) {
+    std::string err;
+    if (to.empty() || from == to) return;
+    if (!presets_.rename(from, to, &err)) {
+        toast(err, 3);
+        return;
+    }
+    renameVoice(mc_->session(), from, to);
+    mc_->markDirty();
+}
+
+void EchoApp::deleteUserPreset(const std::string& name) {
+    std::string err;
+    if (!presets_.remove(name, &err)) {
+        toast(err, 3);
+        return;
+    }
+    mc_->session().voiceSettings.erase(name);
+    mc_->markDirty();
+    toast("Deleted '" + name + "'", 1);
 }
 
 // ---------------------------------------------------------------------------

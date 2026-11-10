@@ -334,6 +334,11 @@ bool PresetLibrary::saveUser(const std::string& name, const std::string& categor
         if (error) *error = "Preset name is empty";
         return false;
     }
+    for (const auto& q : presets_)
+        if (q.factory && q.name == name) {
+            if (error) *error = "A built-in voice is already called '" + name + "'";
+            return false;
+        }
     ChainPreset p;
     p.name = name;
     p.category = category.empty() ? "User" : category;
@@ -349,6 +354,10 @@ bool PresetLibrary::saveUser(const std::string& name, const std::string& categor
 }
 
 bool PresetLibrary::rename(const std::string& oldName, const std::string& newName, std::string* error) {
+    if (newName != oldName && find(newName)) {
+        if (error) *error = "There is already a preset called '" + newName + "'";
+        return false;
+    }
     for (auto& p : presets_) {
         if (p.factory || p.name != oldName) continue;
         const ChainPreset copy = p;

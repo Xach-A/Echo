@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -133,6 +134,10 @@ struct Session {
     UiSettings ui;
     HotkeySettings hotkeys;
     SoundboardSettings soundboard;
+    // Each voice's own settings as they were when it was last taken off an
+    // input (voice name -> its effects as JSON text): picking the voice again
+    // brings them back instead of its preset's (see planVoices).
+    std::map<std::string, std::string> voiceSettings;
     bool firstRunCompleted = false;
     // Add noise suppression to newly added microphone inputs (users can still
     // remove it from any input; this only affects new ones).

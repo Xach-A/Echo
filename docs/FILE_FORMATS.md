@@ -21,7 +21,11 @@ Voices screen while that voice is selected. `"intensity"` (on a distortion
 effect) shows an Intensity slider for its drive; with `"ui_makeup": k`, the
 effect's output rises by k dB per dB of drive below the preset's own value, so
 lowering the Intensity does not make the voice much quieter. `"optional"` (on a
-bit-crusher) shows an on/off switch. The effects themselves ignore these keys.
+bit-crusher) shows an on/off switch. `"singer"` (autotune), `"tone"` (EQ) and
+`"saturation"` (distortion) are Studio Singer's panel. The effects themselves
+ignore these keys; Echo keeps them on the effects it builds and writes them
+back when it saves them, so a user preset saved from a voice keeps its
+controls.
 
 ## Chain preset (`*.echopreset`)
 
@@ -111,6 +115,11 @@ copy them out to export (or use the effects editor's preset manager).
 * `voices`: the voice presets in use on an input, in the order they were
   picked (older files have one `"voice"` name instead; its effects are then
   tagged with it on loading).
+* `voiceSettings`: `{ "<voice name>": [ <effect>... ] }`, each voice's own
+  effects as they were when it was last taken off an input. Picking the voice
+  again uses them instead of its preset's, if they are still the preset's
+  effects in the same order (otherwise the preset's). Reset to default
+  removes the voice's entry.
 * Key codes (`key`): 1-254 are Windows virtual-key codes (keyboard keys, mouse
   buttons 4 = middle, 5/6 = side buttons, media keys...); 0x101-0x1FF keys
   without a virtual-key code (0x100 + scan code, +0x80 for extended keys);
@@ -164,5 +173,5 @@ See `AI_VOICE.md`.
 | `harmonizer` | interval1, level1, pan1, interval2, level2, pan2, dry, mode (0 semitones: interval1/2; 1 in key: steps1/2 along key/scale), key, scale, steps1, steps2 |
 | `doubler` | detune, delay, width, level, dry |
 | `octaver` | sub, up, dry |
-| `autotune` | key, scale, style, strength, speed, smoothing, reference, preserve, vib_rate, vib_depth, range, mix, humanize |
+| `autotune` | key, scale, style, strength, speed, smoothing, reference, preserve, vib_rate, vib_depth, range, mix, humanize, vibrato (Natural vibrato, 0-150 %, default 100) |
 | `ai_voice` | pitch, mix, latency, index (Voice match), response (Quality: 0 Fastest, 1 Fast, 2 Balanced, 3 Smooth, 4 Smoothest; saved as "response", its name in Echo 0.1, where 0-2 meant Quicker, Balanced, Smoother); the model itself is selected in the UI |

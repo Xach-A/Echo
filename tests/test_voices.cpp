@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <memory>
 #include <set>
 #include <string>
@@ -17,6 +18,7 @@
 #include "session/Hotkeys.h"
 #include "session/Presets.h"
 #include "session/Serialization.h"
+#include "session/Session.h"
 #include "session/Voices.h"
 
 using namespace echo;
@@ -315,4 +317,96 @@ TEST_CASE("voice hotkeys: toggle, hold and switch") {
     v = voiceHotkeyResult(sw, true, {"Deep Voice", "Pain"}, held);
     CHECK(v == std::vector<std::string>{"Robot"});
     CHECK(voiceHotkeyResult(sw, true, v, held).empty()); // again: your own voice
+}
+
+TEST_CASE("voices: each voice keeps its own settings when switching voices, after a restart, until reset") {
+    VoiceMemory memory;
+    auto pick = [&](const Chain& chain, const std::string& voice) {
+        const VoicePlan plan = planVoices(chain, {voice}, true, kFind, {}, &memory);
+        REQUIRE(plan.error.empty());
+        for (const auto& [v, s] : plan.remember) memory[v] = s;
+        applyVoicePlan(plan, chain);
+        return settle(plan);
+    };
+    auto autotuneOf = [](const Chain& c) -> Effect* {
+        for (const auto& e : c)
+            if (std::string(e->typeId()) == "autotune") return e.get();
+        return nullptr;
+    };
+    Chain c = pick({makeFx(noiseSuppressorTypeId())}, "Studio Singer");
+    REQUIRE(autotuneOf(c));
+    autotuneOf(c)->setParam("speed", 77.0f); // the user's changes
+    autotuneOf(c)->setParam("key", 7.0f);
+    c = pick(c, "Pain");
+    CHECK(autotuneOf(c) == nullptr);
+    CHECK(memory.count("Studio Singer") == 1);
+    c = pick(c, "Studio Singer"); // back: as left
+    REQUIRE(autotuneOf(c));
+    CHECK(autotuneOf(c)->param(autotuneOf(c)->paramIndex("speed")) == doctest::Approx(77.0f));
+    CHECK(autotuneOf(c)->param(autotuneOf(c)->paramIndex("key")) == doctest::Approx(7.0f));
+    CHECK(autotuneOf(c)->uiRole == "singer"); // its panel still finds it
+
+    // Saved with the session and read back (Echo restarted).
+    Session s;
+    s.voiceSettings = memory;
+    Session back;
+    REQUIRE(sessionFromJson(sessionToJson(s), back, nullptr));
+    CHECK(back.voiceSettings == memory);
+
+    // Reset: the preset's settings again, in place (the same effect).
+    Effect* before = autotuneOf(c);
+    REQUIRE(resetVoiceEffects(c, "Studio Singer", *findPreset("Studio Singer")));
+    CHECK(autotuneOf(c) == before);
+    CHECK(before->param(before->paramIndex("speed")) == doctest::Approx(18.0f));
+    CHECK(before->param(before->paramIndex("key")) == doctest::Approx(0.0f));
+
+    // Remembered settings that no longer fit the preset are not used.
+    memory["Pain"] = "[{\"type\":\"eq\"}]";
+    c = pick(c, "Pain");
+    CHECK(count(c, "distortion") == 3);
+}
+
+TEST_CASE("your presets: they can't take a built-in voice's or another preset's name; renames follow everywhere; they stay saved") {
+    const auto dir = std::filesystem::temp_directory_path() / "echo_test_user_presets";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    PresetLibrary lib;
+    lib.load(dir.wstring());
+    const json chain = json::array({json{{"type", "eq"}, {"params", json::object()}}});
+    std::string err;
+    CHECK_FALSE(lib.saveUser("Studio Singer", "User", "", chain, &err));
+    CHECK(err.find("built-in") != std::string::npos);
+    REQUIRE(lib.saveUser("Mine", "User", "", chain, &err));
+    REQUIRE(lib.saveUser("Other", "User", "", chain, &err));
+    CHECK_FALSE(lib.rename("Mine", "Other", &err));
+    REQUIRE(lib.rename("Mine", "Mine 2", &err));
+    REQUIRE(lib.duplicate("Other", &err));
+    PresetLibrary again; // Echo restarted
+    again.load(dir.wstring());
+    CHECK(again.find("Mine 2"));
+    CHECK(again.find("Other"));
+    CHECK(again.find("Other (copy)"));
+    CHECK_FALSE(again.find("Mine"));
+    REQUIRE(again.remove("Other (copy)", &err));
+    CHECK_FALSE(again.find("Other (copy)"));
+
+    // A renamed voice: the inputs using it, their effects, its remembered
+    // settings and its hotkeys follow.
+    Session s;
+    s.strips.emplace_back();
+    s.strips[0].voices = {"Mine"};
+    auto e = makeFx("eq");
+    e->voice = "Mine";
+    s.strips[0].chain = {e};
+    s.voiceSettings["Mine"] = "[]";
+    VoiceHotkey vk;
+    vk.voices = {"Mine", "Cave Echo"};
+    s.hotkeys.voiceKeys.push_back(vk);
+    renameVoice(s, "Mine", "Mine 2");
+    CHECK(s.strips[0].voices == std::vector<std::string>{"Mine 2"});
+    CHECK(e->voice == "Mine 2");
+    CHECK(s.voiceSettings.count("Mine 2") == 1);
+    CHECK(s.voiceSettings.count("Mine") == 0);
+    CHECK(s.hotkeys.voiceKeys[0].voices == std::vector<std::string>{"Mine 2", "Cave Echo"});
+    std::filesystem::remove_all(dir);
 }

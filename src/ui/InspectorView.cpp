@@ -475,7 +475,7 @@ void EchoApp::drawPresetManager() {
     }
     std::string err;
     if (action == "rename") {
-        if (!presets_.rename(target, renameBuf, &err)) toast(err, 3);
+        renameUserPreset(target, renameBuf);
         renaming.clear();
     } else if (action == "dup") {
         if (!presets_.duplicate(target, &err)) toast(err, 3);
@@ -484,7 +484,7 @@ void EchoApp::drawPresetManager() {
         if (presets_.exportPreset(target, path, &err)) toast("Exported to the settings folder", 1);
         else toast(err, 3);
     } else if (action == "delete") {
-        if (!presets_.remove(target, &err)) toast(err, 3);
+        deleteUserPreset(target);
     }
     ImGui::End();
 }

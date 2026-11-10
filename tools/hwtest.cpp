@@ -1338,6 +1338,51 @@ int presetRender(const std::string& name, const std::wstring& inWav, const std::
     return 0;
 }
 
+// Runs a recording through one effect (mono, 48 kHz, 10 ms blocks) with the
+// given settings ("id=value"), without its delay (the output lines up with
+// the input), and writes the result.
+int fxRender(const std::string& type, const std::wstring& inWav, const std::wstring& outWav, const std::vector<std::string>& settings) {
+    auto fx = EffectRegistry::instance().create(type);
+    WavData w;
+    std::string err;
+    if (!fx || !readWav(inWav, w, &err)) {
+        std::printf("no effect '%s', or can't read the recording\n", type.c_str());
+        return 1;
+    }
+    fx->prepare(48000.0, 480);
+    for (const auto& kv : settings) {
+        const auto eq = kv.find('=');
+        if (eq == std::string::npos || fx->paramIndex(kv.substr(0, eq)) < 0) {
+            std::printf("unknown setting '%s'\n", kv.c_str());
+            return 1;
+        }
+        fx->setParam(kv.substr(0, eq), static_cast<float>(std::atof(kv.c_str() + eq + 1)));
+    }
+    std::vector<float> x(w.samples.size() / w.channels);
+    for (size_t i = 0; i < x.size(); ++i) x[i] = w.samples[i * w.channels];
+    if (w.sampleRate != 48000) x = resampleOffline(x, 1, w.sampleRate, 48000.0);
+    const size_t lat = static_cast<size_t>(fx->latencySamples());
+    std::vector<float> y = x;
+    y.resize(x.size() + lat, 0.0f);
+    const double t0 = monotonicSeconds();
+    for (size_t pos = 0; pos < y.size(); pos += 480) {
+        const int n = static_cast<int>(std::min<size_t>(480, y.size() - pos));
+        float* ch[2] = {y.data() + pos, nullptr};
+        fx->process(ch, 1, n);
+    }
+    const double secs = monotonicSeconds() - t0;
+    std::vector<float> out(y.begin() + static_cast<long>(lat), y.end());
+    WavWriter ww;
+    if (!ww.open(outWav, 48000, 1, 16) || !ww.write(out.data(), out.size())) {
+        std::printf("can't write the output\n");
+        return 1;
+    }
+    ww.close();
+    std::printf("%s: %.1f s, delay %.1f ms, %.2f%% of real time\n", type.c_str(), x.size() / 48000.0, lat / 48.0,
+                100.0 * secs / (x.size() / 48000.0));
+    return 0;
+}
+
 // Writes the factory presets as documented .echopreset files.
 int exportPresets(const std::wstring& dir) {
     std::error_code ec;
@@ -2251,6 +2296,11 @@ int wmain(int argc, wchar_t** argv) {
     SetConsoleOutputCP(CP_UTF8);
     if (argc > 2 && std::wstring(argv[1]) == L"export-presets") return exportPresets(argv[2]);
     if (argc > 4 && std::wstring(argv[1]) == L"preset-render") return presetRender(wideToUtf8(argv[2]), argv[3], argv[4]);
+    if (argc > 4 && std::wstring(argv[1]) == L"fx-render") {
+        std::vector<std::string> settings;
+        for (int i = 5; i < argc; ++i) settings.push_back(wideToUtf8(argv[i]));
+        return fxRender(wideToUtf8(argv[2]), argv[3], argv[4], settings);
+    }
     ComScope com(COINIT_MULTITHREADED);
     if (argc > 3 && std::wstring(argv[1]) == L"decode") return decodeSound(argv[2], argv[3]);
     if (argc > 2 && std::wstring(argv[1]) == L"torch-info") return torchInfo(argv[2]);
