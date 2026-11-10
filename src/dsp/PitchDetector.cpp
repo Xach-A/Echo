@@ -29,6 +29,7 @@ void PitchDetector::reset() {
     std::fill(decBuf_.begin(), decBuf_.end(), 0.0f);
     std::fill(fullBuf_.begin(), fullBuf_.end(), 0.0f);
     decPos_ = fullPos_ = decPhase_ = 0;
+    prior_ = 0.0f;
 }
 
 void PitchDetector::push(float x) {
@@ -76,7 +77,29 @@ PitchDetector::Result PitchDetector::analyze() {
         cmnd_[tau] = run > 0 ? static_cast<float>(diff_[tau] * tau / run) : 1.0f;
     }
     int best = -1;
-    for (int tau = tauMin_; tau < tauMax_; ++tau) {
+    if (prior_ > 0.0f) {
+        const double priorDec = prior_ / dec_;
+        double bestScore = 1e9;
+        for (int tau = tauMin_ + 1; tau < tauMax_; ++tau) {
+            const float v = cmnd_[tau];
+            if (v >= 0.45f || v > cmnd_[tau - 1] || v > cmnd_[tau + 1]) continue; // a dip, clearly periodic
+            double score = v + 0.15 * std::abs(std::log2(tau / priorDec));
+            // A dip at two, three or four times a nearly as deep one is that
+            // one's multiple (the voice went up), not the period.
+            bool multiple = false;
+            for (int k = 2; k <= 4 && !multiple; ++k) {
+                const int part = tau / k;
+                for (int t = std::max(tauMin_, part - 2); t <= part + 2 && part > tauMin_ && !multiple; ++t)
+                    multiple = cmnd_[t] < v + 0.06f && cmnd_[t] <= cmnd_[t - 1] && cmnd_[t] <= cmnd_[t + 1];
+            }
+            if (multiple) score += 0.2;
+            if (score < bestScore) {
+                bestScore = score;
+                best = tau;
+            }
+        }
+    }
+    for (int tau = tauMin_; tau < tauMax_ && best < 0; ++tau) {
         if (cmnd_[tau] < threshold_) {
             while (tau + 1 < tauMax_ && cmnd_[tau + 1] < cmnd_[tau]) ++tau;
             best = tau;

@@ -5,6 +5,7 @@
 
 #include "dsp/NoiseSuppressorInfo.h"
 #include "session/Serialization.h"
+#include "session/Session.h"
 
 namespace echo {
 
@@ -14,6 +15,17 @@ bool contains(const std::vector<std::string>& v, const std::string& s) { return 
 
 // Echo canceller first, then the noise suppressor (the canonical order).
 int cleanupRank(const std::string& type) { return type == echoCancellerTypeId() ? 0 : 1; }
+
+bool isCleanupType(const std::string& t) { return t == noiseSuppressorTypeId() || t == echoCancellerTypeId(); }
+
+// The preset's own effects (its cleanup aside).
+std::vector<const json*> presetVoiceEffects(const json& presetChain) {
+    std::vector<const json*> out;
+    if (presetChain.is_array())
+        for (const auto& fx : presetChain)
+            if (!isCleanupType(fx.value("type", ""))) out.push_back(&fx);
+    return out;
+}
 
 } // namespace
 
@@ -40,7 +52,7 @@ int voiceStage(const json& presetChain) {
 }
 
 VoicePlan planVoices(const std::vector<std::shared_ptr<Effect>>& chain, const std::vector<std::string>& target, bool exclusive,
-                     const PresetFinder& find, const std::set<const Effect*>& fading) {
+                     const PresetFinder& find, const std::set<const Effect*>& fading, const VoiceMemory* memory) {
     VoicePlan plan;
     for (const auto& v : target)
         if (!v.empty() && find(v) && !contains(plan.voices, v)) plan.voices.push_back(v);
@@ -96,7 +108,22 @@ VoicePlan planVoices(const std::vector<std::shared_ptr<Effect>>& chain, const st
     };
     for (const auto& v : toAdd) {
         const ChainPreset* p = find(v);
-        auto fx = chainFromJson(p->chain, nullptr);
+        // Its remembered settings, if they still fit its preset (with the
+        // preset's cleanup), otherwise the preset's.
+        const json* source = &p->chain;
+        json merged;
+        if (memory)
+            if (auto it = memory->find(v); it != memory->end()) {
+                const json own = json::parse(it->second, nullptr, false);
+                if (fitsPreset(own, p->chain)) {
+                    merged = json::array();
+                    for (const auto& e : p->chain)
+                        if (isCleanupType(e.value("type", ""))) merged.push_back(e);
+                    for (const auto& e : own) merged.push_back(e);
+                    source = &merged;
+                }
+            }
+        auto fx = chainFromJson(*source, nullptr);
         std::vector<std::shared_ptr<Effect>> voiceFx;
         for (auto& e : fx) {
             if (isCleanupEffect(*e)) {
@@ -121,6 +148,17 @@ VoicePlan planVoices(const std::vector<std::shared_ptr<Effect>>& chain, const st
         withAdds.insert(withAdds.begin() + static_cast<long>(pos), voiceFx.begin(), voiceFx.end());
     }
 
+    // Voices taken off now: their settings, to remember.
+    std::set<std::string> gone;
+    for (const auto& e : plan.fading)
+        if (!e->voice.empty() && !isCleanupEffect(*e) && !isFading(e.get()) && !contains(want, e->voice)) gone.insert(e->voice);
+    for (const auto& v : gone) {
+        json own = json::array();
+        for (const auto& e : chain)
+            if (e->voice == v && !isCleanupEffect(*e) && !isFading(e.get())) own.push_back(effectToJson(*e));
+        plan.remember[v] = own.dump();
+    }
+
     if (withAdds.size() > static_cast<size_t>(kMaxChainLength)) {
         if (!exclusive) {
             plan = VoicePlan{};
@@ -135,6 +173,67 @@ VoicePlan planVoices(const std::vector<std::shared_ptr<Effect>>& chain, const st
     }
     plan.chain = std::move(withAdds);
     return plan;
+}
+
+json voiceEffectsJson(const std::vector<std::shared_ptr<Effect>>& chain, const std::string& voice) {
+    json out = json::array();
+    for (const auto& e : chain)
+        if (e->voice == voice && !isCleanupEffect(*e)) out.push_back(effectToJson(*e));
+    return out;
+}
+
+bool fitsPreset(const json& voiceEffects, const json& presetChain) {
+    if (!voiceEffects.is_array()) return false;
+    const auto want = presetVoiceEffects(presetChain);
+    if (want.size() != voiceEffects.size()) return false;
+    for (size_t i = 0; i < want.size(); ++i)
+        if (!voiceEffects[i].is_object() || voiceEffects[i].value("type", "") != want[i]->value("type", "")) return false;
+    return true;
+}
+
+bool resetVoiceEffects(const std::vector<std::shared_ptr<Effect>>& chain, const std::string& voice, const ChainPreset& preset) {
+    std::vector<Effect*> live;
+    for (const auto& e : chain)
+        if (e->voice == voice && !isCleanupEffect(*e)) live.push_back(e.get());
+    const auto want = presetVoiceEffects(preset.chain);
+    if (live.size() != want.size()) return false;
+    for (size_t i = 0; i < live.size(); ++i)
+        if (want[i]->value("type", "") != live[i]->typeId()) return false;
+    for (size_t i = 0; i < live.size(); ++i) {
+        Effect& e = *live[i];
+        const json& j = *want[i];
+        e.resetParamsToDefault();
+        if (auto it = j.find("params"); it != j.end() && it->is_object())
+            for (auto p = it->begin(); p != it->end(); ++p) {
+                const int idx = e.paramIndex(p.key());
+                if (idx < 0) continue;
+                if (p->is_number()) e.setParam(idx, p->get<float>());
+                else if (p->is_boolean()) e.setParam(idx, p->get<bool>() ? 1.0f : 0.0f);
+            }
+        e.bypass = j.value("bypass", false);
+        e.uiRole = j.value("ui", "");
+        e.uiMakeup = j.value("ui_makeup", 0.0f);
+        if (auto st = j.find("state"); st != j.end() && st->is_string()) e.loadState(st->get<std::string>());
+    }
+    return true;
+}
+
+void renameVoice(Session& s, const std::string& from, const std::string& to) {
+    if (from == to) return;
+    for (auto& st : s.strips) {
+        for (auto& v : st.voices)
+            if (v == from) v = to;
+        for (auto& e : st.chain)
+            if (e->voice == from) e->voice = to;
+    }
+    if (auto it = s.voiceSettings.find(from); it != s.voiceSettings.end()) {
+        const std::string text = it->second;
+        s.voiceSettings.erase(it);
+        s.voiceSettings[to] = text;
+    }
+    for (auto& vk : s.hotkeys.voiceKeys)
+        for (auto& v : vk.voices)
+            if (v == from) v = to;
 }
 
 void applyVoicePlan(const VoicePlan& plan, const std::vector<std::shared_ptr<Effect>>& /*oldChain*/) {

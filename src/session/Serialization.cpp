@@ -94,6 +94,8 @@ json effectToJson(const Effect& e) {
     json j = {{"type", e.typeId()}, {"bypass", e.bypass.load()}, {"params", params}};
     if (e.label != e.info().name) j["label"] = e.label;
     if (!e.voice.empty()) j["voice"] = e.voice;
+    if (!e.uiRole.empty()) j["ui"] = e.uiRole;
+    if (e.uiMakeup > 0.0f) j["ui_makeup"] = e.uiMakeup;
     if (const std::string st = e.saveState(); !st.empty()) j["state"] = st;
     return j;
 }
@@ -108,6 +110,8 @@ std::shared_ptr<Effect> effectFromJson(const json& j, std::vector<std::string>* 
     e->bypass = get<bool>(j, "bypass", false);
     e->label = get<std::string>(j, "label", e->info().name);
     e->voice = get<std::string>(j, "voice", "");
+    e->uiRole = get<std::string>(j, "ui", "");
+    e->uiMakeup = get<float>(j, "ui_makeup", 0.0f);
     if (const std::string st = get<std::string>(j, "state", ""); !st.empty()) e->loadState(st);
     if (auto it = j.find("params"); it != j.end() && it->is_object()) {
         for (auto p = it->begin(); p != it->end(); ++p) {
@@ -258,6 +262,12 @@ json sessionToJson(const Session& s) {
                         {"mode", static_cast<int>(p.mode)},
                         {"gain", p.gainDb},
                         {"color", p.color}});
+    json voiceSettings = json::object();
+    for (const auto& [name, text] : s.voiceSettings) {
+        json fx = json::parse(text, nullptr, false);
+        if (fx.is_array()) voiceSettings[name] = std::move(fx);
+    }
+    j["voiceSettings"] = std::move(voiceSettings);
     j["soundboard"] = {{"initialized", s.soundboard.initialized},
                        {"builtinVersion", s.soundboard.builtinVersion},
                        {"nextPadId", s.soundboard.nextPadId},
@@ -443,6 +453,9 @@ bool sessionFromJson(const json& j, Session& out, std::vector<std::string>* warn
             }
         }
     }
+    if (auto vs = j.find("voiceSettings"); vs != j.end() && vs->is_object())
+        for (auto it = vs->begin(); it != vs->end(); ++it)
+            if (it->is_array() && !it.key().empty()) s.voiceSettings[it.key()] = it->dump();
     if (auto sb = j.find("soundboard"); sb != j.end() && sb->is_object()) {
         s.soundboard.initialized = get<bool>(*sb, "initialized", false);
         // Boards saved before the version was kept have the first set.

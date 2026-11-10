@@ -21,6 +21,7 @@
 #include "dsp/NoiseSuppressorInfo.h"
 #include "imgui.h"
 #include "imgui_internal.h"
+#include "imgui_stdlib.h"
 #include "session/Paths.h"
 #include "session/StudioSinger.h"
 #include "ui/App.h"
@@ -38,6 +39,8 @@ std::vector<ai::ModelManifest> g_models;
 bool g_modelsScanned = false;
 bool g_aiOpen = false;
 bool g_singerMore = false; // UI snapshot: Studio Singer's More settings open
+// Your presets: the one being renamed or deleted, and the new name.
+std::string g_presetTarget, g_presetName, g_presetDesc;
 
 Effect* findEffect(StripModel& s, const char* type) {
     for (auto& e : s.chain)
@@ -114,7 +117,18 @@ void drawStudioSinger(StripModel& s, const std::string& voice, const std::string
     float feel = singer::tuneFeel(at);
     if (pop::SliderRow("Autotune", singer::tuneFeelName(feel), "##sgfeel", &feel, 0.0f, 100.0f, 70.0f, w))
         singer::setTuneFeel(at, std::round(feel));
-    pop::Hint("Natural keeps your own slides between notes; Robotic snaps every note, the classic hard-tune sound.");
+    pop::Hint("How quickly notes snap: Natural keeps your own slides between notes; Robotic snaps every note and "
+              "flattens vibrato, the classic hard-tune sound.");
+    // Natural vibrato (the Robotic end flattens it anyway).
+    const bool robotic = getp(at, "speed") < 12.0f;
+    float vib = getp(at, "vibrato");
+    ImGui::BeginDisabled(robotic);
+    if (pop::SliderRow("Vibrato", robotic ? "Flattened" : vib < 10.0f ? "Removed" : vib < 75.0f ? "Reduced" : vib <= 115.0f ? "Natural" : "Deeper",
+                       "##sgvib", &vib, 0.0f, 150.0f, 100.0f, w))
+        setp(at, "vibrato", std::round(vib));
+    ImGui::EndDisabled();
+    pop::Hint(robotic ? "Robotic flattens vibrato. Move Autotune down a little to keep yours."
+                      : "How much of your own vibrato stays on long notes: none, as you sing it, or deeper.");
     if (rev) {
         float mix = getp(*rev, "mix");
         std::snprintf(v, sizeof(v), "%.0f%%", mix);
@@ -351,6 +365,7 @@ void EchoApp::drawVoiceLab() {
                                                                       list[i] ? list[i]->description.c_str()
                                                                               : "Your voice, with its noise and echo cleanup",
                                                                       tw));
+        bool openRename = false, openDelete = false;
         for (size_t i = 0; i < list.size(); ++i) {
             if (i % cols) ImGui::SameLine(0, tgap);
             const ChainPreset* pr = list[i];
@@ -372,10 +387,53 @@ void EchoApp::drawVoiceLab() {
                 if (voiceMix_ && pr) toggleVoice(*target, pr->name);
                 else applyVoice(*target, pr);
             }
-            Tip(voiceMix_ && pr ? (on ? "Click to take it out of the mix." : "Click to add it to the mix.") : desc.c_str());
+            Tip(voiceMix_ && pr ? (on ? "Click to take it out of the mix." : "Click to add it to the mix.")
+                                : pr && !pr->factory ? (desc + (desc.empty() ? "" : "\n") + "Right-click to rename, duplicate or delete.").c_str()
+                                                     : desc.c_str());
+            if (pr && !pr->factory && ImGui::BeginPopupContextItem("##presetmenu")) {
+                if (ImGui::MenuItem("Rename...")) {
+                    g_presetTarget = pr->name;
+                    g_presetName = pr->name;
+                    openRename = true;
+                }
+                if (ImGui::MenuItem("Duplicate")) {
+                    std::string err;
+                    if (!presets_.duplicate(pr->name, &err)) toast(err, 3);
+                }
+                if (ImGui::MenuItem("Delete...")) {
+                    g_presetTarget = pr->name;
+                    openDelete = true;
+                }
+                ImGui::EndPopup();
+            }
             ImGui::PopID();
         }
-        if (list.empty()) pop::Hint("No presets here yet. Save one from the effects editor.");
+        if (list.empty()) pop::Hint("No presets here yet. Pick a voice, change it, then use Save as a new preset.");
+        if (openRename) ImGui::OpenPopup("##renamepreset");
+        if (openDelete) ImGui::OpenPopup("##deletepreset");
+        if (ImGui::BeginPopup("##renamepreset")) {
+            pop::Label(("Rename '" + g_presetTarget + "'").c_str());
+            ImGui::SetNextItemWidth(280.0f * sc);
+            const bool enter = ImGui::InputText("##rnname", &g_presetName, ImGuiInputTextFlags_EnterReturnsTrue);
+            if (pop::SmallButton("Rename") || enter) {
+                renameUserPreset(g_presetTarget, g_presetName);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (pop::SmallButton("Cancel")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+        if (ImGui::BeginPopup("##deletepreset")) {
+            ImGui::TextUnformatted(("Delete '" + g_presetTarget + "'?").c_str());
+            pop::Hint("Its file is removed from your presets folder.");
+            if (pop::SmallButton("Delete")) {
+                deleteUserPreset(g_presetTarget);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (pop::SmallButton("Cancel")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
 
         ImGui::Dummy(ImVec2(0, 8.0f * sc));
         pop::BeginCard("##ai", 0.0f, 0.0f, true);
@@ -471,16 +529,20 @@ void EchoApp::drawVoiceLab() {
     Effect* singerSat = nullptr;
     std::string singerVoice;
     for (const std::string& voiceName : target->voices) {
+        if (singerAt) break;
         const ChainPreset* pr = presets_.find(voiceName);
-        if (!pr || singerAt) continue;
-        for (size_t i = 0; i < pr->chain.size(); ++i) {
-            const json& fx = pr->chain[i];
-            const std::string type = fx.value("type", ""), ui = fx.value("ui", "");
-            int n = 0;
-            for (size_t k = 0; k < i; ++k) n += pr->chain[k].value("type", "") == type;
-            if (ui == "singer") singerAt = voiceEffect(*target, voiceName, type, n);
-            else if (ui == "tone") singerTone = voiceEffect(*target, voiceName, type, n);
-            else if (ui == "saturation") singerSat = voiceEffect(*target, voiceName, type, n);
+        if (pr) // effects saved before their roles were: take them from the preset
+            for (size_t i = 0; i < pr->chain.size(); ++i) {
+                const std::string type = pr->chain[i].value("type", ""), ui = pr->chain[i].value("ui", "");
+                int n = 0;
+                for (size_t k = 0; k < i; ++k) n += pr->chain[k].value("type", "") == type;
+                if (Effect* e = ui.empty() ? nullptr : voiceEffect(*target, voiceName, type, n); e && e->uiRole.empty()) e->uiRole = ui;
+            }
+        for (auto& e : target->chain) {
+            if (e->voice != voiceName) continue;
+            if (e->uiRole == "singer" && !singerAt) singerAt = e.get();
+            else if (e->uiRole == "tone" && !singerTone) singerTone = e.get();
+            else if (e->uiRole == "saturation" && !singerSat) singerSat = e.get();
         }
         if (singerAt) singerVoice = voiceName;
     }
@@ -539,6 +601,9 @@ void EchoApp::drawVoiceLab() {
             ParamControl(*tune, 4);
             ImGui::SameLine();
             ParamControl(*tune, 5);
+            ParamControl(*tune, 12); // humanize
+            ImGui::SameLine();
+            ParamControl(*tune, 13); // natural vibrato
         }
         drawPitchGraph(*tune, ImVec2(ImGui::GetContentRegionAvail().x, 120.0f * sc));
         pop::Hint("Pitch correction reaches the listener a little later than your plain voice.");
@@ -552,6 +617,56 @@ void EchoApp::drawVoiceLab() {
         if (pop::Button("Add pitch & formant shifter")) {
             const int pos = afterCleanup(*target);
             defer([this, t, pos]() { mc_->addEffect(t, "pitch", pos); });
+        }
+    }
+    if (!target->voices.empty()) {
+        // Every voice keeps your changes when you switch to another (they
+        // come back when you pick it again); here they're saved as a preset
+        // of your own, or set back to the voice's own.
+        pop::Divider();
+        pop::Label("Your settings");
+        pop::Hint("Each voice keeps your changes when you switch voices, also after Echo restarts.");
+        const ChainPreset* own = target->voices.size() == 1 ? presets_.find(target->voices[0]) : nullptr;
+        if (own && !own->factory) {
+            if (pop::SmallButton(("Save changes to '" + own->name + "'").c_str())) saveVoicePreset(*target, own->name, own->description);
+            ImGui::SameLine();
+        }
+        if (pop::SmallButton("Save as a new preset")) {
+            g_presetName = (own && own->factory ? "My " + own->name : mixLabel + " (mine)");
+            g_presetDesc.clear();
+            ImGui::OpenPopup("##savevoice");
+        }
+        ImGui::SameLine();
+        if (pop::SmallButton("Reset to default")) ImGui::OpenPopup("##resetvoice");
+        if (snapshotIndex_ >= 0 && snapshotSingerSettings_) { // UI snapshot: this, saving a preset
+            ImGui::ScrollToItem(ImGuiScrollFlags_AlwaysCenterY);
+            if (!ImGui::IsPopupOpen("##savevoice")) {
+                g_presetName = "My Studio Singer";
+                ImGui::OpenPopup("##savevoice");
+            }
+        }
+        if (ImGui::BeginPopup("##savevoice")) {
+            pop::Label("Name");
+            ImGui::SetNextItemWidth(280.0f * sc);
+            const bool enter = ImGui::InputText("##svname", &g_presetName, ImGuiInputTextFlags_EnterReturnsTrue);
+            pop::Label("Description (optional)");
+            ImGui::SetNextItemWidth(280.0f * sc);
+            ImGui::InputText("##svdesc", &g_presetDesc);
+            if ((pop::SmallButton("Save") || enter) && saveVoicePreset(*target, g_presetName, g_presetDesc)) ImGui::CloseCurrentPopup();
+            ImGui::SameLine();
+            if (pop::SmallButton("Cancel")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+        if (ImGui::BeginPopup("##resetvoice")) {
+            ImGui::TextUnformatted(("Set " + mixLabel + " back to its own settings?").c_str());
+            pop::Hint("Your changes to it are lost (presets you saved stay).");
+            if (pop::SmallButton("Reset")) {
+                resetVoices(*target);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (pop::SmallButton("Cancel")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
         }
     }
     ImGui::Dummy(ImVec2(0, 4.0f * sc));

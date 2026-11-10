@@ -69,6 +69,12 @@ public:
     // hand, or input cleanup). Lets combined voices be added and taken out
     // one at a time.
     std::string voice;
+    // The role a voice's controls on the Voices screen find this effect by
+    // (its preset's "ui" key, e.g. "singer", "intensity"), and the preset's
+    // "ui_makeup" (see applyIntensity). Saved with it, so a user's copy of a
+    // voice keeps its controls.
+    std::string uiRole;
+    float uiMakeup = 0.0f;
     uint32_t instanceId;
 
     std::atomic<bool> bypass{false};

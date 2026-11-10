@@ -545,3 +545,91 @@ TEST_CASE("studio singer: a long, loud take stays finite and bounded, and its ta
     MESSAGE("3 s after the singing stops: " << tail << " dBFS");
     CHECK(tail < -70.0);
 }
+
+TEST_CASE("autotune: a low note sung off-centre with vibrato stays on its note (no flipping to the next one)") {
+    // B2 + 30 cents with a +-40-cent vibrato: its peaks come within 30 cents
+    // of C3, a semitone up in C major. The note is chosen from the pitch's
+    // centre, so it stays B2 (before: 18 % of the note jumped to C3).
+    auto x = sing(2.6, [](double t) {
+        return music::midiToHz(47.3 + 0.4 * std::sin(2.0 * kPiD * 5.4 * t) * std::clamp((t - 0.3) / 0.3, 0.0, 1.0));
+    });
+    auto at = presetEffect("autotune");
+    singer::setKey(*at, nullptr, 0, music::Major);
+    singer::setTuneFeel(*at, 100.0f); // robotic: every frame on the note
+    const double lat = at->latencySamples() / kSr;
+    const auto c = centsBetween(track(runMono(*at, x)), 0.4 + lat, 2.5, music::midiToHz(47));
+    int off = 0;
+    for (double v : c) off += std::abs(v) > 60.0;
+    MESSAGE("B2 + 30 cents with vibrato: " << off << " of " << c.size() << " frames left B2; spread " << stddev(c) << " cents");
+    CHECK(c.size() > 300);
+    CHECK(off <= static_cast<int>(c.size()) / 100);
+    CHECK(stddev(c) < 8.0);
+}
+
+TEST_CASE("autotune: Natural vibrato takes away, keeps or deepens a held note's vibrato") {
+    auto x = sing(2.6, [](double t) { return 220.0 * std::pow(2.0, (10.0 + 45.0 * std::sin(2.0 * kPiD * 5.4 * t)) / 1200.0); });
+    const double sung = stddev(centsBetween(track(x), 1.0, 2.5, 220.0));
+    auto spread = [&](float vibrato) {
+        auto at = presetEffect("autotune");
+        at->setParam("vibrato", vibrato);
+        const double lat = at->latencySamples() / kSr;
+        return stddev(centsBetween(track(runMono(*at, x)), 1.0 + lat, 2.5, 220.0));
+    };
+    const double none = spread(0.0f), natural = spread(100.0f), deeper = spread(150.0f);
+    MESSAGE("vibrato spread: sung " << sung << " cents; Natural vibrato 0 % " << none << ", 100 % " << natural << ", 150 % " << deeper);
+    CHECK(none < 0.35 * sung);
+    CHECK(natural > 0.85 * sung);
+    CHECK(natural < 1.15 * sung);
+    CHECK(deeper > 1.3 * sung);
+}
+
+TEST_CASE("autotune: a slower retune speed takes longer to reach the note") {
+    // A4 sung 40 cents flat, held.
+    auto x = sing(1.5, [](double) { return 440.0 * std::pow(2.0, -40.0 / 1200.0); });
+    auto reach = [&](float speedMs) {
+        auto at = presetEffect("autotune");
+        at->setParam("speed", speedMs);
+        at->setParam("humanize", 0.0f);
+        const double lat = at->latencySamples() / kSr;
+        const auto f = track(runMono(*at, x));
+        for (size_t k = static_cast<size_t>(lat * 200.0); k < f.size(); ++k)
+            if (f[k] > 0.0 && std::abs(centsOff(f[k], 440.0)) < 10.0) return k / 200.0 - lat;
+        return 9.0;
+    };
+    const double fast = reach(0.0f), mid = reach(60.0f), slow = reach(200.0f);
+    MESSAGE("within 10 cents of A4 after: retune 0 ms " << fast * 1000 << " ms, 60 ms " << mid * 1000 << " ms, 200 ms " << slow * 1000
+                                                         << " ms (tracker included)");
+    CHECK(fast < 0.08);
+    CHECK(mid > fast);
+    CHECK(slow > mid + 0.1);
+}
+
+TEST_CASE("pitch detector: tracking keeps the octave of a voice with a strong second harmonic, and follows a real leap") {
+    auto tone = [](double f0, double h1, double h2, double h3) {
+        std::vector<float> v(static_cast<size_t>(0.12 * kSr));
+        for (size_t i = 0; i < v.size(); ++i) {
+            const double t = i / kSr;
+            v[i] = static_cast<float>(0.2 * (h1 * std::sin(2 * kPiD * f0 * t) + h2 * std::sin(2 * kPiD * 2 * f0 * t + 0.4) +
+                                             h3 * std::sin(2 * kPiD * 3 * f0 * t + 1.1)));
+        }
+        return v;
+    };
+    PitchDetector d;
+    d.prepare(kSr, 55.0, 600.0);
+    // 100 Hz whose second harmonic is three times its first, tracked at 100 Hz.
+    for (float s : tone(100.0, 0.3, 1.0, 0.4)) d.push(s);
+    d.setPrior(480.0f);
+    const PitchDetector::Result held = d.analyze();
+    // The singer leaps an octave up: followed, though the prior is 100 Hz.
+    for (float s : tone(200.0, 1.0, 0.3, 0.2)) d.push(s);
+    const PitchDetector::Result leap = d.analyze();
+    // And an octave down (the old period is gone from the signal).
+    d.setPrior(240.0f);
+    for (float s : tone(100.0, 1.0, 0.5, 0.3)) d.push(s);
+    const PitchDetector::Result down = d.analyze();
+    MESSAGE("strong 2nd harmonic: " << held.hz << " Hz; leap up: " << leap.hz << " Hz; leap down: " << down.hz << " Hz");
+    CHECK(held.voiced);
+    CHECK(held.hz == doctest::Approx(100.0).epsilon(0.01));
+    CHECK(leap.hz == doctest::Approx(200.0).epsilon(0.01));
+    CHECK(down.hz == doctest::Approx(100.0).epsilon(0.01));
+}

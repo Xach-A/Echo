@@ -150,6 +150,13 @@ public:
     BusModel* firstBus(BusKind kind);
     // Uses only this voice preset on an input (nullptr = original voice).
     void applyVoice(StripModel& s, const ChainPreset* p);
+    // The input's voices back to their presets' settings (in place).
+    void resetVoices(StripModel& s);
+    // Saves the input's voice effects as a user preset (Your presets).
+    bool saveVoicePreset(StripModel& s, const std::string& name, const std::string& description);
+    // User presets renamed or deleted, with the session's references to them.
+    void renameUserPreset(const std::string& from, const std::string& to);
+    void deleteUserPreset(const std::string& name);
     // Adds a voice to the input's mix, or takes it out.
     void toggleVoice(StripModel& s, const std::string& name);
     // Sets the voices of an input. exclusive: everything else goes (also
@@ -298,6 +305,7 @@ private:
     void drawUpdates();
     bool snapshotShowAi_ = false;
     bool snapshotSingerMore_ = false; // snapshots: Studio Singer's More settings open
+    bool snapshotSingerSettings_ = false; // snapshots: Your settings in view, saving a preset
     // VB-CABLE: download VB-Audio's pack, then open its installer.
     struct VbCableJob {
         std::string error;
