@@ -35,6 +35,7 @@
 //                                 app's Install button does (doesn't open the installer)
 //   echo_hwtest all               run everything above (playback is audible, -40 dBFS)
 #include <windows.h>
+#include <tlhelp32.h>
 #include <audiopolicy.h>
 
 #include <algorithm>
@@ -952,6 +953,270 @@ void cmdCableRaw(DeviceManager& dm, int seconds, double queueMs) {
                 "capture discontinuities %llu\n",
                 queueMs, seconds, gaps, gapMs, list.c_str(), (unsigned long long)ren->stats.underruns.load(),
                 (unsigned long long)cap->stats.overruns.load(), (unsigned long long)cap->stats.discontinuities.load());
+}
+
+// Plays a quiet 1234.5 Hz tone (dBFS) into the cable's second input ("CABLE
+// In 16ch": the first is usually Echo's) in shared or exclusive mode for some
+// seconds and checks every 10 ms of it on the cable's output for gaps.
+void cmdCableModeTest(DeviceManager& dm, bool exclusive, int seconds, double levelDb, bool secondary) {
+    const CablePair* pair = nullptr;
+    const auto pairs = findCablePairs(dm.devices());
+    for (const auto& p : pairs)
+        if (p.secondary == secondary) pair = &p;
+    if (!pair) {
+        std::printf("no such cable input\n");
+        return;
+    }
+    std::string err;
+    StreamOptions ro;
+    ro.deviceId = fromUtf8(pair->renderId);
+    ro.exclusive = exclusive;
+    auto ren = WasapiRender::open(ro, &err);
+    if (!ren) {
+        std::printf("can't open '%s': %s\n", pair->renderName.c_str(), err.c_str());
+        return;
+    }
+    StreamOptions co;
+    co.deviceId = fromUtf8(pair->captureId);
+    auto cap = WasapiCapture::open(co, &err);
+    if (!cap) {
+        std::printf("can't open '%s': %s\n", pair->captureName.c_str(), err.c_str());
+        return;
+    }
+    const int rch = ren->channels(), cch = cap->channels();
+    const double rsr = ren->sampleRate(), csr = cap->sampleRate();
+    const float amp = static_cast<float>(std::pow(10.0, levelDb / 20.0));
+    std::vector<float> block, tmp(48000 * cch), captured;
+    double phase = 0.0;
+    const auto start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start < std::chrono::seconds(seconds)) {
+        const size_t queued = ren->ring().size() / rch;
+        const size_t want = static_cast<size_t>(rsr * 0.04);
+        if (queued < want) {
+            const size_t n = want - queued;
+            block.assign(n * rch, 0.0f);
+            for (size_t i = 0; i < n; ++i) {
+                const float s = amp * static_cast<float>(std::sin(2.0 * kPiD * phase));
+                phase += 1234.5 / rsr;
+                if (phase >= 1.0) phase -= 1.0;
+                for (int c = 0; c < rch; ++c) block[i * rch + c] = s;
+            }
+            ren->ring().write(block.data(), block.size());
+        }
+        const size_t frames = std::min(cap->ring().readAvailable(), tmp.size()) / cch;
+        if (frames) {
+            cap->ring().read(tmp.data(), frames * cch);
+            for (size_t i = 0; i < frames; ++i) captured.push_back(tmp[i * cch]);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    // Tone level per 10 ms; after it first arrives, a gap is a 10 ms more than 12 dB down.
+    const size_t hop = static_cast<size_t>(csr / 100.0);
+    int frames10 = 0, gaps = 0;
+    bool started = false;
+    for (size_t k = 0; (k + 1) * hop <= captured.size(); ++k) {
+        double re = 0.0, im = 0.0;
+        for (size_t i = 0; i < hop; ++i) {
+            const double a = 2.0 * kPiD * 1234.5 * (k * hop + i) / csr;
+            re += captured[k * hop + i] * std::cos(a);
+            im -= captured[k * hop + i] * std::sin(a);
+        }
+        const double lv = 20.0 * std::log10(2.0 * std::sqrt(re * re + im * im) / hop + 1e-15);
+        if (!started) {
+            started = lv > levelDb - 12.0;
+            continue;
+        }
+        ++frames10;
+        gaps += lv < levelDb - 12.0;
+    }
+    std::printf("%s mode into '%s': %s, %.1f s checked, %d of %d 10-ms frames missing the tone; render underruns %llu\n",
+                exclusive ? "exclusive" : "shared", pair->renderName.c_str(), ren->options().exclusive ? "ran exclusive" : "ran shared",
+                frames10 / 100.0, gaps, frames10, (unsigned long long)ren->stats.underruns.load());
+}
+
+// Switching the cable input between shared and exclusive mode while the old
+// stream is still closing (what Echo does when the virtual mic's mode changes):
+// the new stream must end up in the mode asked for, not fall back.
+void cmdExclusiveHandover(DeviceManager& dm) {
+    const CablePair* pair = nullptr;
+    const auto pairs = findCablePairs(dm.devices());
+    for (const auto& p : pairs)
+        if (!p.secondary) pair = &p;
+    if (!pair) {
+        std::printf("no cable input\n");
+        return;
+    }
+    auto waitOpen = [](const std::shared_ptr<WasapiRender>& r) {
+        const auto t0 = std::chrono::steady_clock::now();
+        while (r->status() == EndpointStatus::Starting && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(6))
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    };
+    auto name = [](EndpointStatus s) {
+        return s == EndpointStatus::Running ? "running" : s == EndpointStatus::Error ? "error" : "other";
+    };
+    for (int round = 0; round < 3; ++round)
+        for (bool toExclusive : {true, false}) {
+            StreamOptions o;
+            o.deviceId = fromUtf8(pair->renderId);
+            o.exclusive = !toExclusive;
+            std::string err;
+            auto oldStream = WasapiRender::open(o, &err);
+            if (!oldStream) {
+                std::printf("can't open the first stream: %s\n", err.c_str());
+                return;
+            }
+            o.exclusive = toExclusive;
+            auto next = WasapiRender::openAsync(o);
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            oldStream.reset(); // closed while the new one is opening
+            const double s = waitOpen(next);
+            const bool ok = next->status() == EndpointStatus::Running && next->isExclusive() == toExclusive;
+            std::printf("[%s] %s -> %s: %s, %s, opened after %.2f s\n", ok ? "PASS" : "FAIL",
+                        toExclusive ? "shared" : "exclusive", toExclusive ? "exclusive" : "shared", name(next->status()),
+                        next->isExclusive() ? "exclusive" : "shared", s);
+        }
+}
+
+// Every running process of one program (by its exe name).
+std::vector<DWORD> processIdsByName(const wchar_t* exe) {
+    std::vector<DWORD> out;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return out;
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe))
+        if (_wcsicmp(pe.szExeFile, exe) == 0) out.push_back(pe.th32ProcessID);
+    CloseHandle(snap);
+    return out;
+}
+
+// Where a sound played to one output shows up for other apps: plays a quiet
+// 1 kHz tone (level in dBFS) from this process to the output whose name
+// contains `outName` only, and measures it in each kind of capture apps use
+// for "system" or app audio: process loopback including this process,
+// process loopback of everything except another process (what an app
+// sharing "everything but itself" gets, e.g. a full-screen share), and the
+// loopback of the default output (what the headphones play).
+void cmdLoopbackProbe(DeviceManager& dm, const std::string& outName, double levelDb, bool exclusive) {
+    std::string targetId, targetName;
+    for (const auto& d : dm.devices())
+        if (d.flow == Flow::Render && d.active() && d.name.find(outName) != std::string::npos) {
+            targetId = d.idUtf8;
+            targetName = d.name;
+        }
+    const std::string defaultId = dm.defaultDeviceId(Flow::Render);
+    if (targetId.empty() || targetId == defaultId) {
+        std::printf("no non-default output named like '%s'\n", outName.c_str());
+        return;
+    }
+    std::string err;
+    StreamOptions ro;
+    ro.deviceId = fromUtf8(targetId);
+    ro.exclusive = exclusive;
+    auto ren = WasapiRender::open(ro, &err);
+    if (!ren) {
+        std::printf("can't open %s: %s\n", targetName.c_str(), err.c_str());
+        return;
+    }
+    struct Probe {
+        const char* what;
+        std::shared_ptr<WasapiCapture> cap;
+        std::vector<float> mono;
+    };
+    std::vector<Probe> probes;
+    auto add = [&](const char* what, StreamOptions o) {
+        o.label = what;
+        auto c = WasapiCapture::open(o, &err);
+        if (!c) std::printf("%-58s can't open: %s\n", what, err.c_str());
+        else probes.push_back({what, c, {}});
+    };
+    StreamOptions self;
+    self.captureMode = CaptureMode::ProcessLoopback;
+    self.processId = GetCurrentProcessId();
+    self.includeProcessTree = true;
+    add("this app's sound (process loopback, include)", self);
+    DWORD shellPid = 0;
+    GetWindowThreadProcessId(GetShellWindow(), &shellPid);
+    StreamOptions others;
+    others.captureMode = CaptureMode::ProcessLoopback;
+    others.processId = shellPid;
+    others.includeProcessTree = false;
+    add("everything but another app (process loopback, exclude)", others);
+    StreamOptions def;
+    def.captureMode = CaptureMode::Loopback;
+    def.deviceId = fromUtf8(defaultId);
+    add("what the default output plays (endpoint loopback)", def);
+    // Programs that might play other programs' sound again.
+    for (const wchar_t* exe : {L"Echo.exe", L"Discord.exe"}) {
+        for (DWORD pid : processIdsByName(exe)) {
+            StreamOptions o;
+            o.captureMode = CaptureMode::ProcessLoopback;
+            o.processId = pid;
+            o.includeProcessTree = true;
+            static std::vector<std::string> names; // labels outlive the probes
+            names.push_back("only " + wideToUtf8(exe) + " " + std::to_string(pid) + " (process loopback, include)");
+            add(names.back().c_str(), o);
+        }
+    }
+    constexpr double kProbeHz = 1234.5; // not a note: other sounds rarely sit exactly there
+    const int rch = ren->channels();
+    const double rsr = ren->sampleRate();
+    const float amp = static_cast<float>(std::pow(10.0, levelDb / 20.0));
+    std::vector<float> block, tmp(48000 * 8);
+    double phase = 0.0;
+    const auto start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start < std::chrono::seconds(3)) {
+        const size_t queued = ren->ring().size() / rch;
+        const size_t want = static_cast<size_t>(rsr * 0.05);
+        if (queued < want) {
+            const size_t n = want - queued;
+            block.assign(n * rch, 0.0f);
+            for (size_t i = 0; i < n; ++i) {
+                const float s = amp * static_cast<float>(std::sin(2.0 * kPiD * phase));
+                phase += kProbeHz / rsr;
+                if (phase >= 1.0) phase -= 1.0;
+                for (int c = 0; c < rch; ++c) block[i * rch + c] = s;
+            }
+            ren->ring().write(block.data(), block.size());
+        }
+        for (auto& p : probes) {
+            const int ch = p.cap->channels();
+            const size_t frames = std::min(p.cap->ring().readAvailable(), tmp.size()) / ch;
+            if (!frames) continue;
+            p.cap->ring().read(tmp.data(), frames * ch);
+            for (size_t i = 0; i < frames; ++i) p.mono.push_back(tmp[i * ch]);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    std::printf("A %.0f dBFS %.1f Hz tone played to '%s' only (not the default output, %s mode):\n", levelDb, kProbeHz,
+                targetName.c_str(), exclusive ? "exclusive" : "shared");
+    for (auto& p : probes) {
+        // The level at the tone's frequency over the last second captured, and
+        // around it (other sounds): heard if it stands 15 dB above them.
+        const double sr = p.cap->sampleRate();
+        const size_t n = std::min(p.mono.size(), static_cast<size_t>(sr));
+        auto levelAt = [&](double hz) {
+            double re = 0.0, im = 0.0;
+            for (size_t i = 0; i < n; ++i) {
+                const double w = 0.5 - 0.5 * std::cos(2.0 * kPiD * i / std::max<size_t>(1, n - 1));
+                const double x = p.mono[p.mono.size() - n + i] * w, a = 2.0 * kPiD * hz * i / sr;
+                re += x * std::cos(a);
+                im -= x * std::sin(a);
+            }
+            return n ? 20.0 * std::log10(4.0 * std::sqrt(re * re + im * im) / n + 1e-12) : -240.0;
+        };
+        const double level = levelAt(kProbeHz);
+        std::vector<double> around;
+        for (double d = 6.0; d <= 40.0; d += 2.0) {
+            around.push_back(levelAt(kProbeHz - d));
+            around.push_back(levelAt(kProbeHz + d));
+        }
+        std::sort(around.begin(), around.end());
+        const double floorDb = around[around.size() / 2];
+        const bool heard = level - floorDb > 6.0 && level > levelDb - 3.0;
+        std::printf("  %-62s %s (tone %.1f, other sound %.1f dBFS)\n", p.what, heard ? "HEARS IT" : "silent", level, floorDb);
+    }
 }
 
 void cmdProcLoop(DeviceManager& dm) {
@@ -2344,6 +2609,9 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (cmd == L"sysaudio" || cmd == L"all") cmdSysAudio(dm);
     if (cmd == L"approute") cmdAppRoute(dm);
+    if (cmd == L"exclusive-handover") cmdExclusiveHandover(dm);
+    if (cmd == L"cable-mode")cmdCableModeTest(dm, argc > 2 && std::wstring(argv[2]) == L"exclusive", argc > 3 ? _wtoi(argv[3]) : 10, argc > 4 ? _wtof(argv[4]) : -80.0, argc > 5 && std::wstring(argv[5]) == L"16ch");
+    if (cmd == L"loopback-probe" && argc > 2) cmdLoopbackProbe(dm, wideToUtf8(argv[2]), argc > 3 ? _wtof(argv[3]) : -90.0, argc > 4 && std::wstring(argv[4]) == L"exclusive");
     if (cmd == L"perf") cmdPerf(dm);
     if (cmd == L"appsoak") cmdAppSoak(dm, argc > 2 ? _wtoi(argv[2]) : 60, argc > 3 ? _wtoi(argv[3]) : 0);
     if (cmd == L"cableraw") cmdCableRaw(dm, argc > 2 ? _wtoi(argv[2]) : 15, argc > 3 ? _wtof(argv[3]) : 40.0);

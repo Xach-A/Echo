@@ -770,6 +770,7 @@ uint32_t MixerController::addBus(BusKind kind, const OutputRef& out, const std::
     b.slot = slot;
     b.kind = kind;
     b.output = out;
+    if (kind == BusKind::Virtual) b.output.exclusive = true; // keeps the voice out of screen shares
     b.name = name;
     b.color = kind == BusKind::Physical ? 0xFF4DD2FF : 0xFFB98CFF;
     prepareBus(b);
@@ -972,6 +973,7 @@ bool MixerController::assignCablesToEmptyVirtualBuses() {
             if (used) continue;
             b.output.deviceId = d.id;
             b.output.deviceName = d.name;
+            b.output.exclusive = true; // keeps the voice out of screen shares (see Session.h)
             std::string capture;
             const std::string capId = backend_.cablePartnerOfRender(d.id);
             for (const auto& c : devs)
@@ -1071,6 +1073,13 @@ void MixerController::migrateSession() {
                     const int i = e->paramIndex("response");
                     if (i >= 0) e->setParam(i, std::clamp(std::round(e->param(i)), 0.0f, 2.0f) + 1.0f);
                 }
+        dirty_ = true;
+    }
+    if (session_.configVersion < 7) {
+        // Virtual mics play into their cable in exclusive mode from now on,
+        // so screen shares can't pick the voice up from Echo (see Session.h).
+        for (auto& b : session_.buses)
+            if (b.kind == BusKind::Virtual) b.output.exclusive = true;
         dirty_ = true;
     }
     if (session_.configVersion < 2) {
@@ -1229,6 +1238,7 @@ void MixerController::createDefaultSession() {
     b1.kind = BusKind::Virtual;
     b1.name = "Virtual Mic";
     b1.color = 0xFFB98CFF;
+    b1.output.exclusive = true; // keeps the voice out of screen shares (see Session.h)
     for (const auto& d : backend_.devices())
         if (d.render && d.active && d.isCable && !d.isCableSecondary) {
             b1.output.deviceId = d.id;

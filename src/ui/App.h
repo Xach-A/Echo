@@ -317,6 +317,7 @@ private:
     VbCableJob vbCableLast_;
     bool snapshotNoCable_ = false; // snapshots: show the screens as without a cable
     bool cableTestRunning_ = false;
+    uint32_t cableTestPausedBus_ = 0; // a virtual mic in shared mode while the cable test runs
     bool cableTestDone_ = false;
     win::CableTestResult cableTestResult_;
     std::string cableTestRender_;

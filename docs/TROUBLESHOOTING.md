@@ -36,7 +36,9 @@ some USB/virtual devices; repeated clicks are not.
 
 
 * Raise the buffer size (Settings > Audio engine > 1024) and press Apply.
-* Turn off "Low-latency shared mode" and exclusive mode.
+* Turn off "Low-latency shared mode", and exclusive mode on headphones and
+  speakers. (On the virtual mic it keeps your voice out of screen shares, see
+  below; turn it off there only to check whether it causes the clicks.)
 * High DSP load: remove heavy effects (High-quality pitch shifting, AI voice),
   or use the "Low latency" pitch quality.
 * Check Diagnostics: underruns on one device point to that device/driver;
@@ -77,6 +79,25 @@ Diagnostics for Echo dropouts (those would be Echo's, and are counted there).
   few seconds of playback to adapt and is not needed with headphones. Audio
   enhancements that change the speaker signal after Windows' loopback point
   (some Realtek/Dolby effects) reduce how much echo can be removed.
+
+## Friends hear my voice twice when I share my screen
+
+Discord's screen share with sound (like OBS's application audio) records what
+other apps play, on every device, not only on your speakers. Echo plays your
+voice into the virtual cable, so a shared screen could carry it as well: your
+friends heard it from your microphone and again, a little later, from the
+stream.
+
+Echo therefore plays into the cable in exclusive mode: Mixer > the virtual
+mic's "..." menu > **Keep my voice out of screen shares**. Your voice then goes
+straight to the cable, where screen shares can't record it. Sessions from
+earlier versions get it turned on once.
+
+* "Windows didn't allow exclusive mode" under that option: another app is
+  playing into the same cable. Close that app, then choose the virtual mic's
+  device again.
+* Sharing only the window you want to show (for example the browser) instead
+  of the entire screen also helps: Discord then takes only that app's sound.
 
 ## Sound only through Echo, not twice
 

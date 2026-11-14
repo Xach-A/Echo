@@ -299,6 +299,15 @@ void EchoApp::updateMeters(double now, double dt) {
 
 void EchoApp::startCableTest(const std::string& renderId, const std::string& captureId) {
     if (cableTestRunning_) return;
+    cableTestPausedBus_ = 0;
+    for (const auto& b : mc_->session().buses)
+        if (b.output.deviceId == renderId && b.output.exclusive) {
+            OutputRef shared = b.output;
+            shared.exclusive = false;
+            cableTestPausedBus_ = b.id;
+            mc_->setBusOutput(b.id, shared);
+            break;
+        }
     cableTestRunning_ = true;
     cableTestDone_ = false;
     cableTestRender_ = renderId;
@@ -584,6 +593,12 @@ void EchoApp::frame(double now, double dt) {
         cableTestResult_ = cableTestFuture_.get();
         cableTestRunning_ = false;
         cableTestDone_ = true;
+        if (BusModel* b = mc_->session().bus(cableTestPausedBus_)) { // back to exclusive
+            OutputRef o = b->output;
+            o.exclusive = true;
+            mc_->setBusOutput(b->id, o);
+        }
+        cableTestPausedBus_ = 0;
         toast(cableTestResult_.ok ? "Loopback test passed: " + cableTestResult_.message
                                   : "Loopback test failed: " + cableTestResult_.message,
               cableTestResult_.ok ? 1 : 3);

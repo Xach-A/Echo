@@ -19,7 +19,7 @@ Legend
 | Real-time graph: sources → strips → buses → outputs | Tested, HW-verified | Lock-free snapshots; changes apply without restarting. |
 | Physical microphone capture (WASAPI shared) | HW-verified | Blue Snowball: 0 dropouts in a 60 s soak. |
 | Physical playback | HW-verified | Realtek headphones; confirmed via loopback. |
-| Exclusive mode, IAudioClient3 low-latency shared mode | Implemented | Falls back to shared mode automatically; not hardware-tested. |
+| Exclusive mode, IAudioClient3 low-latency shared mode | Implemented | Falls back to shared mode automatically (the Mixer says so). Virtual mics use exclusive mode by default so that apps recording other apps' sound (Discord's screen share, OBS) can't pick up the voice from Echo: process loopback captured a shared-mode tone from Echo's test tool, and nothing of the same tone in exclusive mode (measured on a monitor's audio output). On VB-CABLE: exclusive mode hides the voice from process loopback and plays without dropouts (measured). Low-latency shared mode: not hardware-tested. |
 | Sample rates 44.1/48/88.2/96 kHz, any device rate | Tested | Windowed-sinc SRC; 44.1↔48 kHz verified within 2 cents, 6-channel output. |
 | Block sizes 64–2048 | Tested | Output identical across block sizes (37 vs 480 samples). |
 | Mono/stereo strips, channel selection, multi-channel devices, downmix | Tested | 4-channel input pair selection; 6-channel output mapping. |

@@ -111,7 +111,9 @@ HRESULT initExclusive(IMMDevice* dev, ComPtr<IAudioClient>& client, int preferre
     bool found = false;
     for (SampleKind k : kinds) {
         WAVEFORMATEXTENSIBLE wf = makeFormat(preferredRate, channels, k);
-        if (client->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, &wf.Format, nullptr) == S_OK) {
+        const HRESULT fs = client->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, &wf.Format, nullptr);
+        if (fs == AUDCLNT_E_DEVICE_IN_USE) return fs; // busy, not unsupported
+        if (fs == S_OK) {
             chosen = wf;
             found = true;
             break;
@@ -467,8 +469,25 @@ HRESULT WasapiRender::initialize() {
     const DeviceFormat mixFmt = describeFormat(mix);
     REFERENCE_TIME period = 100000;
     bool exclusive = false;
+    // A device can stay busy for a moment after a stream on it closes (Echo's
+    // own one, when an output switches between shared and exclusive mode, or
+    // the virtual mic during the cable test): try again for up to 2 s.
+    auto busyRetry = [&](int attempt) {
+        if (hr != AUDCLNT_E_DEVICE_IN_USE || attempt >= 20 || WaitForSingleObject(stopEvent_, 100) == WAIT_OBJECT_0)
+            return false;
+        client_.Reset();
+        hr = dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(client_.GetAddressOf()));
+        return SUCCEEDED(hr);
+    };
     if (opt_.exclusive) {
-        hr = initExclusive(dev.Get(), client_, opt_.preferredSampleRate, mixFmt.channels, format_, period);
+        for (int attempt = 0;; ++attempt) {
+            hr = initExclusive(dev.Get(), client_, opt_.preferredSampleRate, mixFmt.channels, format_, period);
+            if (!busyRetry(attempt)) break;
+        }
+        if (!client_) {
+            CoTaskMemFree(mix);
+            return hr;
+        }
         if (SUCCEEDED(hr)) {
             exclusive = true;
         } else {
@@ -496,8 +515,15 @@ HRESULT WasapiRender::initialize() {
             }
         }
         if (FAILED(hr)) {
-            hr = client_->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, kHnsPerSec * 3 / 100, 0,
-                                     mix, nullptr);
+            for (int attempt = 0;; ++attempt) {
+                hr = client_->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, kHnsPerSec * 3 / 100,
+                                         0, mix, nullptr);
+                if (!busyRetry(attempt)) break;
+            }
+            if (!client_) {
+                CoTaskMemFree(mix);
+                return hr;
+            }
             REFERENCE_TIME defPeriod = 0, minPeriod = 0;
             if (SUCCEEDED(client_->GetDevicePeriod(&defPeriod, &minPeriod)) && defPeriod > 0) period = defPeriod;
         }
@@ -527,6 +553,7 @@ HRESULT WasapiRender::initialize() {
     const UINT32 pre = exclusive ? bufferFrames_ : static_cast<UINT32>(std::min<int>(periodFrames_, bufferFrames_));
     if (SUCCEEDED(render_->GetBuffer(pre, &data))) render_->ReleaseBuffer(pre, AUDCLNT_BUFFERFLAGS_SILENT);
     opt_.exclusive = exclusive;
+    exclusiveNow_ = exclusive;
     return client_->Start();
 }
 

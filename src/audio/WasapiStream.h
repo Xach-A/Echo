@@ -105,6 +105,7 @@ public:
     double deviceLatencySeconds() const override { return latencySec_; }
     const std::string& describe() const override { return opt_.label; }
     void setWakeTarget(WakeTarget* target, int thresholdFrames) override;
+    bool isExclusive() const override { return exclusiveNow_.load(); }
 
     const DeviceFormat& format() const { return format_; }
     const StreamOptions& options() const { return opt_; }
@@ -136,6 +137,7 @@ private:
     uint64_t flowTotal_ = 0; // device thread only
     std::atomic<int> status_{static_cast<int>(EndpointStatus::Starting)};
     std::atomic<WakeTarget*> wake_{nullptr};
+    std::atomic<bool> exclusiveNow_{false};
     std::atomic<int> wakeThreshold_{0};
     mutable std::mutex errMutex_;
     std::string error_;

@@ -305,6 +305,7 @@ void EchoApp::drawDevices() {
                     OutputRef o;
                     o.deviceId = c.renderId;
                     o.deviceName = c.renderName;
+                    o.exclusive = true; // keeps the voice out of screen shares
                     BusModel* vb = nullptr;
                     for (auto& b : s.buses)
                         if (b.kind == BusKind::Virtual && b.output.deviceId.empty()) {
