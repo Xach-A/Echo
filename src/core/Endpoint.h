@@ -123,6 +123,9 @@ public:
     virtual void setWakeTarget(WakeTarget* target, int thresholdFrames) = 0;
     // Why the stream failed (status Error), if known.
     virtual std::string lastError() const { return {}; }
+    // Whether the stream holds its device in exclusive mode (it may have
+    // been asked to and fallen back to shared mode).
+    virtual bool isExclusive() const { return false; }
     // Newest chunk read from ring() by the device thread (false if not
     // available) and the current time on the same clock.
     virtual bool flowStamp(FlowStamp& /*out*/) const { return false; }

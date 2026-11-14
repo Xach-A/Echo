@@ -48,7 +48,7 @@ copy them out to export (or use the effects editor's preset manager).
 
 ```json
 {
-  "format": "echo.session", "version": 5, "firstRunCompleted": true,
+  "format": "echo.session", "version": 7, "firstRunCompleted": true,
   "autoNoiseSuppression": true, "nextId": 9,
   "strips": [{
     "id": 3, "name": "Microphone", "color": 4283411967, "group": "hardware",
@@ -103,7 +103,11 @@ copy them out to export (or use the effects editor's preset manager).
   depth became −60 dB; noise suppressors saved at the old −30 dB default
   move to −60 dB once. Version 5: the AI voice's `latency` (Buffer) became
   the least delay with a default of 100 ms; AI voices saved at the old
-  default of 400 move to 100 once.
+  default of 400 move to 100 once. Version 6: the AI voice's Response
+  (0–2) moved to Quality's five steps (1–3). Version 7: virtual-mic buses
+  play in exclusive mode (`output.exclusive`), so screen shares can't record
+  the voice from Echo; it is turned on once for older sessions and can be
+  turned off again.
 * `ui.themeMode`: 0 light, 1 dark, 2 match Windows, 3 Midnight, 4 Ocean,
   5 Forest, 6 Sunset, 7 Slate, 8 OLED black, 9 Rose, 10 Sand, 11 Mint,
   12 High contrast, 13 custom (`customTheme`). `accent`: coral, blue, green,

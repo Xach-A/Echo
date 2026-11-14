@@ -7,7 +7,7 @@ LLVM-MinGW clang 23.1.1, Release build).
 
 ## 1. Automated tests (`echo_tests.exe`)
 
-189 test cases, **4712 assertions, all passing** (2026-11-10; the 97 cases of
+190 test cases, **4726 assertions, all passing** (2026-11-14; the 97 cases of
 2026-10-09 also ran under AddressSanitizer + UndefinedBehaviorSanitizer with zero
 reports, see section 5). They use generated signals,
 the real engine and controller code, and in-memory fake devices (no audio
@@ -26,7 +26,7 @@ generates the samples the same way before testing.
 | Voice | YIN accuracy 82–880 Hz (< 5 cents) and unvoiced noise; phase-vocoder shifts −12…+12 st (< 8 cents, level kept); formant preservation (spectral peak stays vs moves); granular octave; autotune hard snap to scale (< 12 cents) and chromatic correction; strength 0 leaves pitch |
 | Robustness | every effect under random parameters, 4 trials each (no NaN/Inf, bounded); defaults never silent; reproducible output; NaN-producing effect isolated; bypass crossfade has no discontinuity |
 | Engine & routing | unity path; multiple destinations; isolated bus mixes; live routing changes without clicks; mute/solo; dB composition of trim/fader/send/bus; pre-fader sends; pan law/balance; bus limiter; repeated snapshot swaps; identical output for 37- vs 480-sample blocks |
-| Controller & devices | virtual-cable pairing with VB-CABLE's real endpoint names (standard endpoint preferred, 16-channel endpoint secondary, different drivers never paired); a cable installed while Echo runs is assigned to the unassigned virtual-mic bus (and never to a bus the user set) and feedback protection covers the secondary endpoint; default session; shared capture streams; mic → headphones + virtual mic with independent gains; feedback blocking (cable loop and loopback loop); device loss and reconnection; reconnect by name; missing devices at startup; app capture by process name; 44.1↔48 kHz with 6-channel output; 200 ppm drift for 60 s with zero under/overruns; 4-channel input channel selection |
+| Controller & devices | virtual-cable pairing with VB-CABLE's real endpoint names (standard endpoint preferred, 16-channel endpoint secondary, different drivers never paired); a cable installed while Echo runs is assigned to the unassigned virtual-mic bus (and never to a bus the user set) and feedback protection covers the secondary endpoint; the virtual mic plays into its cable in exclusive mode (default session, cable assignment, a new bus, a one-time upgrade of older sessions; turned off by the user stays off); default session; shared capture streams; mic → headphones + virtual mic with independent gains; feedback blocking (cable loop and loopback loop); device loss and reconnection; reconnect by name; missing devices at startup; app capture by process name; 44.1↔48 kHz with 6-channel output; 200 ppm drift for 60 s with zero under/overruns; 4-channel input channel selection |
 | Persistence & presets | session round trip; tolerant parsing of unknown/future fields; atomic save and recovery from a corrupt file; all 34 factory presets valid; applying "Deep Voice" measured at −5 st through the whole controller path; user preset save/rename/duplicate/delete; older sessions upgraded once (voice gate depth, AI voice Buffer 400 → 100, Quality defaulting to Balanced, Response's Quicker/Balanced/Smoother moved to Fast/Balanced/Smooth); the run marker tells a crash from a run that ended with Windows (an earlier sign-in) |
 | Recording | bus (post-fader) and strip (pre-fader) recordings in 16/24/32-bit, with 48→44.1 kHz conversion, read back and checked for rate, level and pitch |
 | Stress | 300 rapid add/remove/route operations; 40 start/stop cycles of the real engine thread; 120 graph edits while the engine thread runs |
@@ -164,7 +164,16 @@ user's settings kept; the "also delete settings?" question defaults to No).
   download, checksum and unpacking were run; VB-Audio's installer itself was
   not, because VB-CABLE was already installed on the test PC.
 * **Exclusive mode, low-latency shared mode** — implemented with automatic
-  fallback; not exercised on this hardware.
+  fallback. Measured (`echo_hwtest loopback-probe`): a tone played in shared
+  mode reached process loopback (what Discord's screen share uses), the same
+  tone in exclusive mode did not (on a monitor's audio output, and again on
+  VB-CABLE's CABLE Input: −70.0 dBFS shared, nothing exclusive). Exclusive
+  mode into CABLE Input: 0 of 1993 10-ms frames lost in 20 s, twice (shared:
+  0 and 1). Switching the cable between the modes while the old stream is
+  still closing (`echo_hwtest exclusive-handover`, 3 rounds each way):
+  exclusive → shared failed every time before (device in use), now opens
+  within 0.1 s; shared → exclusive works either way. Low-latency shared mode
+  was not exercised.
 * **Physical unplug/replug, sleep/resume, changing the Windows default device
   by hand** — logic tested with fake devices only. (Windows shutting down
   while Echo runs was checked for real: no "did not close normally" message

@@ -903,3 +903,50 @@ TEST_CASE("appearance: themes, accent and the user's own colours are saved and l
     CHECK(back.ui.customAccent == UiSettings{}.customAccent);
     CHECK(back.ui.customText == UiSettings{}.customText);
 }
+
+TEST_CASE("virtual cables: the virtual mic plays into its cable in exclusive mode (out of screen shares), also after an upgrade") {
+    // A shared-mode stream goes through Windows' mixer, where an app capturing
+    // other apps' sound (Discord's screen share takes everything but Discord)
+    // gets it on any device; an exclusive one goes straight to the driver.
+    FakeBackend backend;
+    backend.addDevice("mic", "USB Mic", false, 1, 48000, true);
+    backend.addDevice("phones", "Headphones", true, 2, 48000, true);
+    MixerController mc(backend);
+    mc.session().autoNoiseSuppression = false;
+    mc.createDefaultSession();
+    REQUIRE(mc.session().buses.size() == 2);
+    CHECK_FALSE(mc.session().buses[0].output.exclusive); // headphones: shared
+    CHECK(mc.session().buses[1].output.exclusive);       // virtual mic, before a cable is found
+    mc.start(false);
+    mc.update(1.0);
+    backend.addDevice("cable_in", "CABLE Input (VB-Audio Virtual Cable)", true, 2, 48000, false, true);
+    backend.addDevice("cable_out", "CABLE Output (VB-Audio Virtual Cable)", false, 2, 48000, false, true);
+    backend.cablePartners["cable_in"] = "cable_out";
+    backend.changed = true;
+    mc.update(2.0);
+    REQUIRE(mc.session().buses[1].output.deviceId == "cable_in");
+    CHECK(mc.session().buses[1].output.exclusive);
+    CHECK(backend.renderExclusive["cable_in"]);
+    CHECK_FALSE(backend.renderExclusive["phones"]);
+    // A virtual mic added by hand too.
+    const uint32_t added = mc.addBus(BusKind::Virtual, OutputRef{}, "Second mic");
+    REQUIRE(mc.session().bus(added));
+    CHECK(mc.session().bus(added)->output.exclusive);
+
+    // A session saved before (version 6, shared): the virtual mic moves to
+    // exclusive once; a physical output stays as it was.
+    Session old;
+    std::vector<std::string> warn;
+    REQUIRE(sessionFromJson(sessionToJson(mc.session()), old, &warn));
+    old.configVersion = 6;
+    for (auto& b : old.buses) b.output.exclusive = false;
+    mc.replaceSession(std::move(old));
+    CHECK(mc.session().buses[1].output.exclusive);
+    CHECK_FALSE(mc.session().buses[0].output.exclusive);
+    // Turned off by the user afterwards: stays off (no upgrade again).
+    Session mine;
+    REQUIRE(sessionFromJson(sessionToJson(mc.session()), mine, &warn));
+    mine.buses[1].output.exclusive = false;
+    mc.replaceSession(std::move(mine));
+    CHECK_FALSE(mc.session().buses[1].output.exclusive);
+}

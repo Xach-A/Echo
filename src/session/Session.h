@@ -34,6 +34,11 @@ struct SourceRef {
 struct OutputRef {
     std::string deviceId;
     std::string deviceName;
+    // WASAPI exclusive mode: Echo alone plays into the device, straight to its
+    // driver. Virtual mics use it by default: a shared-mode stream goes
+    // through Windows' mixer, where apps capturing other apps' sound (Discord's
+    // screen-share audio, which takes everything but Discord; OBS) get it on
+    // any device, so a voice sent to a cable would reach a screen share too.
     bool exclusive = false;
     std::string key() const { return deviceId + (exclusive ? "|x" : ""); }
 };
@@ -122,7 +127,8 @@ struct UiSettings {
 // Version 2: noise suppression became a default part of microphone inputs.
 // Version 3: the soundboard got an input of its own in the mixer.
 // Version 4: the voice gate's default depth became -60 dB.
-constexpr int kSessionConfigVersion = 6;
+// Version 7: virtual mics play into their cable in exclusive mode.
+constexpr int kSessionConfigVersion = 7;
 
 struct Session {
     int configVersion = kSessionConfigVersion;

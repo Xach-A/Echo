@@ -105,6 +105,7 @@ public:
     bool changed = false;
     bool asyncOpen = false; // endpoints start in status Starting (like real WASAPI opening)
     int openCaptureCalls = 0, openRenderCalls = 0;
+    std::map<std::string, bool> renderExclusive; // output id -> opened in exclusive mode
 
     void addDevice(const std::string& id, const std::string& name, bool render, int ch = 2, int rate = 48000,
                    bool isDefault = false, bool cable = false) {
@@ -159,6 +160,7 @@ public:
         auto r = std::make_shared<FakeRender>(d->channels, d->rate);
         if (asyncOpen) r->status_ = EndpointStatus::Starting;
         renders[req.deviceId] = r;
+        renderExclusive[req.deviceId] = req.exclusive;
         return r;
     }
     std::vector<BackendDevice> devices() override {

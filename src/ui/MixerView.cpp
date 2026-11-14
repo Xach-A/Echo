@@ -440,13 +440,22 @@ void EchoApp::drawBusRow(BusModel& b, float width) {
         ImGui::SetNextItemWidth(200 * sc);
         if (ImGui::SliderFloat("Limiter ceiling", &ceil, -12.0f, 0.0f, "%.1f dBFS")) rt.limiterCeilingDb = ceil;
         bool excl = b.output.exclusive;
-        if (ImGui::Checkbox("Exclusive mode (lower latency)", &excl)) {
+        const bool virtualMic = b.kind == BusKind::Virtual;
+        if (ImGui::Checkbox(virtualMic ? "Keep my voice out of screen shares (exclusive mode)" : "Exclusive mode (lower latency)", &excl)) {
             OutputRef o = b.output;
             o.exclusive = excl;
             const uint32_t id = b.id;
             defer([this, id, o]() { mc_->setBusOutput(id, o); });
         }
-        Tip("Takes the device for Echo alone: lower latency, but other apps can't use it meanwhile.");
+        Tip(virtualMic ? "Echo plays your voice straight into the cable (exclusive mode). Otherwise apps that capture other apps' "
+                         "sound, like Discord's screen share with audio or OBS, pick it up from Echo too, and your voice is heard "
+                         "twice. Other apps can't play into this cable meanwhile."
+                       : "Takes the device for Echo alone: lower latency, but other apps can't use it meanwhile.");
+        if (const RenderEndpoint* ep = mc_->renderEndpointFor(b.id);
+            excl && ep && ep->status() == EndpointStatus::Running && !ep->isExclusive())
+            pop::TextColoredWrapped(pal().warn, virtualMic ? "Windows didn't allow exclusive mode (another app may be playing into this "
+                                                             "cable), so screen shares can pick up your voice."
+                                                           : "Windows didn't allow exclusive mode; the device runs shared.");
         bool clock = mc_->session().engine.clockBusId == b.id;
         if (ImGui::Checkbox("Use as timing source", &clock)) {
             mc_->session().engine.clockBusId = clock ? b.id : 0;
